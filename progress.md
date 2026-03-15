@@ -23,3 +23,4 @@ Original prompt: i have an idea make a sorting alogrithm with a web that display
   - super missile flight (`seed=321`, `variant=super`, `advance=2400`)
   - super `SORT-NUKE-ED` celebration with waste cloud still visible (`seed=321`, `variant=super`, `advance=4200`)
 - New verification artifacts: `north-korea-sort-normal-mid-v3.png`, `north-korea-sort-normal-finish-v3.png`, `north-korea-sort-super-mid-v1.png`, `north-korea-sort-super-cloud-v1.png`.
+- Investigated the GitHub Pages report: the live `script.js` matched local byte-for-byte, so the most likely culprit is stale cached assets. Added `?v=20260316-4` cache-busting query strings to `styles.css` and `script.js` in `index.html`.
