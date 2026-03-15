@@ -13,3 +13,13 @@ Original prompt: i have an idea make a sorting alogrithm with a web that display
 - Added procedural audio with Web Audio API tones/noise for scan blips, launches, impacts, placement, and celebration. Sound may need one click to arm because of browser autoplay rules.
 - Verified the updated desktop layout, a mid-sort missile state, the finished celebration state, and a narrow mobile viewport with local headless Chrome screenshots.
 - New verification artifacts include `north-korea-sort-initial-v2.png`, `north-korea-sort-mid-v2.png`, `north-korea-sort-finish-v2.png`, `north-korea-sort-mobile-v2.png`, and several temporary `.chrome-profile-*` folders.
+- Reworked the sorter into a true zero-swap left-to-right destructive pass: green prefix grows from the left, missiles enter from the right, and only badly placed bars are deleted while survivors slide left.
+- Added optional seeded debug runs (`?seed=`), hidden DOM dumps (`?dump_text=1`), and an optional `?variant=super` startup hook to make headless verification reproducible.
+- Added a `Super Nuke` control that resets the bars, keeps only a tiny ordered survivor subsequence, deletes the rest in one oversized blast, shows a radioactive mushroom cloud, and ends on `SORT-NUKE-ED`.
+- Adjusted Kim's pose so his hand actually reaches the red button during launch phases.
+- Verified with headless Chrome DOM dumps and screenshots for:
+  - normal missile flight (`seed=123`, `advance=2400`)
+  - normal celebration (`seed=123`, `advance=30000`)
+  - super missile flight (`seed=321`, `variant=super`, `advance=2400`)
+  - super `SORT-NUKE-ED` celebration with waste cloud still visible (`seed=321`, `variant=super`, `advance=4200`)
+- New verification artifacts: `north-korea-sort-normal-mid-v3.png`, `north-korea-sort-normal-finish-v3.png`, `north-korea-sort-super-mid-v1.png`, `north-korea-sort-super-cloud-v1.png`.

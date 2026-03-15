@@ -88,7 +88,7 @@ body::before {
 
 .control-rack {
   display: grid;
-  grid-template-columns: minmax(120px, 170px) minmax(260px, 1fr) auto auto;
+  grid-template-columns: minmax(120px, 170px) minmax(220px, 1fr) auto auto auto;
   gap: 14px;
   padding: 18px 20px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -278,6 +278,14 @@ body::before {
   background: rgba(255, 255, 255, 0.07);
   color: var(--text-main);
   border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.super-button {
+  background:
+    radial-gradient(circle at 28% 22%, rgba(255, 255, 255, 0.22), transparent 35%),
+    linear-gradient(180deg, rgba(146, 21, 17, 0.98) 0%, rgba(80, 11, 8, 0.98) 100%);
+  border-color: rgba(255, 145, 113, 0.42);
+  box-shadow: 0 14px 28px rgba(92, 11, 8, 0.28);
 }
 
 .legend {

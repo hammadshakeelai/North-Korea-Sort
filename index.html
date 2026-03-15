@@ -48,6 +48,9 @@
             </div>
           </label>
 
+          <button id="super-nuke-btn" class="ghost-button super-button" type="button">
+            Super Nuke
+          </button>
           <button id="sound-btn" class="ghost-button" type="button">Arm Sound</button>
           <button id="reset-btn" class="ghost-button" type="button">Deploy New Bars</button>
         </div>
@@ -61,9 +64,9 @@
           ></canvas>
 
           <div id="victory-panel" class="overlay hidden" role="dialog" aria-modal="true">
-            <p class="overlay-tag">Zero swaps completed</p>
-            <h2>YEEEAAAH!</h2>
-            <p>The remaining bars are in order, and no swaps were ever used.</p>
+            <p id="overlay-tag" class="overlay-tag">Zero swaps completed</p>
+            <h2 id="overlay-title">YEEEAAAH!</h2>
+            <p id="overlay-copy">The remaining bars are in order, and no swaps were ever used.</p>
             <button id="restart-btn" type="button">Restart Sequence</button>
           </div>
         </div>

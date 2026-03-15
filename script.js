@@ -3,9 +3,13 @@ const ctx = canvas.getContext("2d");
 const statusText = document.getElementById("status-text");
 const detailText = document.getElementById("detail-text");
 const victoryPanel = document.getElementById("victory-panel");
+const overlayTag = document.getElementById("overlay-tag");
+const overlayTitle = document.getElementById("overlay-title");
+const overlayCopy = document.getElementById("overlay-copy");
 const restartBtn = document.getElementById("restart-btn");
 const resetBtn = document.getElementById("reset-btn");
 const soundBtn = document.getElementById("sound-btn");
+const superNukeBtn = document.getElementById("super-nuke-btn");
 const barCountInput = document.getElementById("bar-count-input");
 const speedInput = document.getElementById("speed-input");
 const speedReadout = document.getElementById("speed-readout");
@@ -20,6 +24,7 @@ const BAR_MAX = 100;
 const MAX_YIELD = 4;
 const BUTTON_POINT = { x: 346, y: 566 };
 const MISSILE_ORIGIN = { x: WIDTH + 70, y: 190 };
+const SUPER_KEEP_RATIO = 0.1;
 const TIMINGS = {
   intro: 0.8,
   scanStep: 0.2,
@@ -38,13 +43,28 @@ const BAR_PALETTES = {
 
 const urlParams = new URLSearchParams(window.location.search);
 const requestedAdvance = Number(urlParams.get("advance"));
+const requestedSeed = Number(urlParams.get("seed"));
+const baseRandomSeed = Number.isFinite(requestedSeed) ? (requestedSeed >>> 0) || 1 : null;
+const debugStateNode =
+  urlParams.get("dump_text") === "1"
+    ? (() => {
+        const node = document.createElement("pre");
+        node.id = "debug-game-state";
+        node.hidden = true;
+        document.body.appendChild(node);
+        return node;
+      })()
+    : null;
 
 let nextBarId = 1;
 let lastTimestamp = performance.now();
+let randomState = baseRandomSeed;
 
 const state = {
   mode: "running",
   phase: "intro",
+  runVariant: "normal",
+  endingVariant: "normal",
   initialBarCount: DEFAULT_BAR_COUNT,
   activeBars: [],
   stablePrefixLength: 0,
@@ -65,6 +85,7 @@ const state = {
   impactPoint: null,
   transition: null,
   explosionFlash: 0,
+  wasteCloud: null,
   audioContext: null,
 };
 
@@ -73,7 +94,15 @@ function clamp(value, min, max) {
 }
 
 function randomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  return Math.floor(random() * (max - min + 1)) + min;
+}
+
+function random() {
+  if (randomState === null) {
+    return Math.random();
+  }
+  randomState = (1664525 * randomState + 1013904223) >>> 0;
+  return randomState / 4294967296;
 }
 
 function shuffle(items) {
@@ -129,6 +158,19 @@ function refreshDetail(extra = "") {
   const stableText = `Stable-left ${state.stablePrefixLength}`;
   const base = `${yieldText} | Survivors ${state.activeBars.length} | Deleted ${destroyedCount()} | ${stableText}`;
   setDetail(extra ? `${base} | ${extra}` : base);
+}
+
+function setVictoryContent(endingVariant) {
+  if (endingVariant === "super") {
+    overlayTag.textContent = "Super nuke complete";
+    overlayTitle.textContent = "SORT-NUKE-ED";
+    overlayCopy.textContent = "One giant blast erased almost everything, and only a tiny ordered survivor line is left.";
+    return;
+  }
+
+  overlayTag.textContent = "Zero swaps completed";
+  overlayTitle.textContent = "YEEEAAAH!";
+  overlayCopy.textContent = "The remaining bars are in order, and no swaps were ever used.";
 }
 
 function updateSpeedLabel() {
@@ -211,7 +253,7 @@ function playNoise(duration = 0.2, volume = 0.05) {
   const buffer = audioContext.createBuffer(1, Math.floor(audioContext.sampleRate * duration), audioContext.sampleRate);
   const data = buffer.getChannelData(0);
   for (let index = 0; index < data.length; index += 1) {
-    data[index] = (Math.random() * 2 - 1) * (1 - index / data.length);
+    data[index] = (random() * 2 - 1) * (1 - index / data.length);
   }
 
   const source = audioContext.createBufferSource();
@@ -276,7 +318,7 @@ function buildBars(count) {
   ).slice(0, count);
 
   return values.map((value) => ({
-    id: nextBarId += 1,
+    id: nextBarId++,
     value,
   }));
 }
@@ -344,6 +386,57 @@ function collectBadIndices(startIndex, threshold) {
     }
   }
   return indices.length ? indices : [startIndex];
+}
+
+function longestNonDecreasingSubsequenceIndices(values) {
+  const length = values.length;
+  const dp = new Array(length).fill(1);
+  const previous = new Array(length).fill(-1);
+  let bestIndex = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    for (let inner = 0; inner < index; inner += 1) {
+      if (values[inner] <= values[index] && dp[inner] + 1 > dp[index]) {
+        dp[index] = dp[inner] + 1;
+        previous[index] = inner;
+      }
+    }
+
+    if (dp[index] > dp[bestIndex]) {
+      bestIndex = index;
+    }
+  }
+
+  const indices = [];
+  for (let cursor = bestIndex; cursor !== -1; cursor = previous[cursor]) {
+    indices.push(cursor);
+  }
+
+  return indices.reverse();
+}
+
+function pickSuperSurvivorIndices() {
+  const values = state.activeBars.map((bar) => bar.value);
+  const orderedChain = longestNonDecreasingSubsequenceIndices(values);
+  const keepTarget = Math.max(1, Math.round(values.length * SUPER_KEEP_RATIO));
+  return orderedChain.slice(0, Math.max(1, Math.min(keepTarget, orderedChain.length)));
+}
+
+function startSuperStrike() {
+  const survivorSet = new Set(pickSuperSurvivorIndices());
+
+  state.phase = "targeting";
+  state.timer = 0;
+  state.stablePrefixLength = 0;
+  state.scanIndex = 0;
+  state.thresholdValue = null;
+  state.targetIndices = state.activeBars
+    .map((_, index) => index)
+    .filter((index) => !survivorSet.has(index));
+  state.blastYield = state.targetIndices.length;
+  state.impactPoint = getImpactPoint(state.targetIndices);
+  setStatus("The super nuke locks onto nearly the whole queue in one radioactive pass.");
+  refreshDetail(`Super delete ${state.targetIndices.length}`);
 }
 
 function startScanPhase() {
@@ -421,9 +514,10 @@ function lockTargets(threshold) {
 function createMissile() {
   const start = { ...MISSILE_ORIGIN };
   const target = { ...state.impactPoint };
+  const displayYield = Math.min(state.blastYield, state.runVariant === "super" ? 8 : state.blastYield);
   const control = {
     x: lerp(start.x, target.x, 0.42),
-    y: Math.min(start.y, target.y) - 170 - state.blastYield * 24,
+    y: Math.min(start.y, target.y) - 170 - displayYield * 24,
   };
   return { start, control, target, progress: 0 };
 }
@@ -433,6 +527,11 @@ function launchMissile() {
   state.timer = 0;
   state.missile = createMissile();
   playLaunchSound(state.blastYield);
+  if (state.runVariant === "super") {
+    setStatus("The super nuke rips in from the right with a city-level payload.");
+    refreshDetail(`Super delete ${state.targetIndices.length}`);
+    return;
+  }
   setStatus("A missile streaks in from the right toward the marked bars.");
   refreshDetail(`Delete zone ${state.targetIndices.length}`);
 }
@@ -440,15 +539,15 @@ function launchMissile() {
 function spawnImpactEffects(point, yieldSize) {
   const particleCount = 28 + yieldSize * 12;
   for (let index = 0; index < particleCount; index += 1) {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = 110 + Math.random() * (150 + yieldSize * 28);
+    const angle = random() * Math.PI * 2;
+    const speed = 110 + random() * (150 + yieldSize * 28);
     state.particles.push({
       x: point.x,
       y: point.y,
       vx: Math.cos(angle) * speed,
       vy: Math.sin(angle) * speed - 60,
-      life: 0.55 + Math.random() * 0.55,
-      size: 7 + Math.random() * (16 + yieldSize * 2),
+      life: 0.55 + random() * 0.55,
+      size: 7 + random() * (16 + yieldSize * 2),
       color: index % 3 === 0 ? "#ffe17f" : index % 3 === 1 ? "#ff715f" : "#ffffff",
     });
   }
@@ -458,10 +557,10 @@ function spawnImpactEffects(point, yieldSize) {
       x: point.x + randomInt(-50, 50),
       y: point.y + randomInt(-30, 30),
       vx: randomInt(-30, 30),
-      vy: -18 - Math.random() * 34,
-      life: 1.1 + Math.random() * 0.7,
-      radius: 24 + Math.random() * (18 + yieldSize * 3),
-      alpha: 0.4 + Math.random() * 0.18,
+      vy: -18 - random() * 34,
+      life: 1.1 + random() * 0.7,
+      radius: 24 + random() * (18 + yieldSize * 3),
+      alpha: 0.4 + random() * 0.18,
     });
   }
 }
@@ -473,6 +572,17 @@ function enterImpactPhase() {
   state.missile = null;
   spawnImpactEffects(state.impactPoint, state.blastYield);
   playImpactSound(state.blastYield);
+  if (state.runVariant === "super") {
+    state.wasteCloud = {
+      x: state.impactPoint.x,
+      y: state.impactPoint.y + 28,
+      life: 3.2,
+      maxLife: 3.2,
+    };
+    setStatus("The super blast turns the kill zone into a mushroom cloud of nuclear waste.");
+    refreshDetail(`Deleting ${state.targetIndices.length}`);
+    return;
+  }
   setStatus("Direct hit. The marked bars are erased instead of being swapped.");
   refreshDetail(`Deleting ${state.targetIndices.length}`);
 }
@@ -505,9 +615,9 @@ function beginCollapseTransition() {
     removedMoves: removed.map((entry) => ({
       bar: entry.bar,
       fromRect: getBarRect(oldLayout, entry.index, entry.bar.value),
-      driftX: -20 + Math.random() * 40,
-      driftY: -36 - Math.random() * 72,
-      rotation: -0.35 + Math.random() * 0.7,
+      driftX: -20 + random() * 40,
+      driftY: -36 - random() * 72,
+      rotation: -0.35 + random() * 0.7,
     })),
   };
 
@@ -515,6 +625,11 @@ function beginCollapseTransition() {
   state.phase = "collapse";
   state.timer = 0;
   state.stablePrefixLength = 0;
+  if (state.runVariant === "super") {
+    setStatus("The super blast strips out almost the whole queue and leaves only a tiny survivor line.");
+    refreshDetail(`Deleted ${removed.length} bars`);
+    return;
+  }
   setStatus("The hit bars vanish and the survivors slide left with zero swaps.");
   refreshDetail(`Deleted ${removed.length} bars`);
 }
@@ -523,28 +638,43 @@ function spawnConfettiBurst() {
   for (let index = 0; index < 8; index += 1) {
     state.confetti.push({
       x: randomInt(430, 1280),
-      y: -20 - Math.random() * 80,
-      vx: -60 + Math.random() * 120,
-      vy: 90 + Math.random() * 120,
-      spin: Math.random() * Math.PI,
-      spinVelocity: -5 + Math.random() * 10,
-      life: 2 + Math.random() * 1.2,
-      size: 10 + Math.random() * 14,
+      y: -20 - random() * 80,
+      vx: -60 + random() * 120,
+      vy: 90 + random() * 120,
+      spin: random() * Math.PI,
+      spinVelocity: -5 + random() * 10,
+      life: 2 + random() * 1.2,
+      size: 10 + random() * 14,
       color: ["#42d77c", "#ffe17f", "#ff5d55", "#8de8ff"][index % 4],
     });
   }
 }
 
-function completeSort() {
+function completeSort(endingVariant = state.runVariant === "super" ? "super" : "normal") {
   state.mode = "celebration";
   state.phase = "celebration";
+  state.endingVariant = endingVariant;
   state.timer = 0;
   state.stablePrefixLength = state.activeBars.length;
   state.targetIndices = [];
   state.blastYield = 0;
   state.missile = null;
   state.transition = null;
+  setVictoryContent(endingVariant);
   victoryPanel.classList.remove("hidden");
+  if (endingVariant === "super") {
+    state.confetti = [];
+    playTone({
+      frequency: 140,
+      endFrequency: 90,
+      duration: 0.5,
+      volume: 0.06,
+      type: "sawtooth",
+    });
+    setStatus("Sort-nuke-ed. A tiny ordered survivor line remains after the super blast.");
+    refreshDetail("Sort-nuke-ed");
+    return;
+  }
   spawnConfettiBurst();
   playVictoryFanfare();
   setStatus("Only an ordered survivor line remains, and it was finished with zero swaps.");
@@ -558,10 +688,17 @@ function finalizeCollapse() {
   state.thresholdValue = null;
   state.impactPoint = null;
   state.explosionFlash = 0;
+  if (state.runVariant === "super") {
+    completeSort("super");
+    return;
+  }
   startScanPhase();
 }
 
-function initializeSimulation() {
+function initializeSimulation(runVariant = "normal") {
+  randomState = baseRandomSeed;
+  state.runVariant = runVariant;
+  state.endingVariant = "normal";
   state.initialBarCount = readBarCount();
   state.mode = "running";
   state.phase = "intro";
@@ -580,7 +717,14 @@ function initializeSimulation() {
   state.impactPoint = null;
   state.transition = null;
   state.explosionFlash = 0;
+  state.wasteCloud = null;
+  setVictoryContent("normal");
   victoryPanel.classList.add("hidden");
+  if (runVariant === "super") {
+    setStatus("A fresh queue is being lined up for the super nuke.");
+    refreshDetail("Super mode armed");
+    return;
+  }
   setStatus("Kim Jong Un lines up a new queue while the checker waits on the left.");
   refreshDetail();
 }
@@ -617,6 +761,17 @@ function updateSmoke(dt) {
   }
 }
 
+function updateWasteCloud(dt) {
+  if (!state.wasteCloud) {
+    return;
+  }
+
+  state.wasteCloud.life -= dt;
+  if (state.wasteCloud.life <= 0) {
+    state.wasteCloud = null;
+  }
+}
+
 function updateConfetti(dt) {
   state.celebrationPulse += dt;
   if (state.celebrationPulse >= 0.12) {
@@ -645,10 +800,19 @@ function updateAlgorithm(dt) {
   state.explosionFlash = Math.max(0, state.explosionFlash - dt * 2.3);
 
   if (state.phase === "intro") {
-    setStatus("The left-side inspection is about to begin.");
-    refreshDetail();
+    if (state.runVariant === "super") {
+      setStatus("The super nuke is charging while a fresh queue waits in the blast zone.");
+      refreshDetail("Super mode armed");
+    } else {
+      setStatus("The left-side inspection is about to begin.");
+      refreshDetail();
+    }
     if (state.timer >= TIMINGS.intro) {
-      startScanPhase();
+      if (state.runVariant === "super") {
+        startSuperStrike();
+      } else {
+        startScanPhase();
+      }
     }
     return;
   }
@@ -703,9 +867,12 @@ function update(dt) {
 
   updateParticles(state.particles, scaledDt, 180);
   updateSmoke(scaledDt);
+  updateWasteCloud(scaledDt);
 
   if (state.mode === "celebration") {
-    updateConfetti(scaledDt);
+    if (state.endingVariant !== "super") {
+      updateConfetti(scaledDt);
+    }
     return;
   }
 
@@ -776,7 +943,16 @@ function drawStageFrame() {
 function drawKim() {
   const pressed = ["targeting", "missile", "impact"].includes(state.phase);
   const bodyLean = pressed ? 12 : 0;
-  const armLean = pressed ? 26 : 0;
+  const shoulderX = 84;
+  const shoulderY = 100;
+  const buttonTargetX = BUTTON_POINT.x - (140 + bodyLean);
+  const buttonTargetY = BUTTON_POINT.y - 520;
+  const touchAngle = Math.atan2(buttonTargetY - shoulderY, buttonTargetX - shoulderX);
+  const restAngle = -12 * (Math.PI / 180);
+  const armAngle = pressed ? touchAngle : restAngle;
+  const armLength = pressed
+    ? Math.max(108, Math.hypot(buttonTargetX - shoulderX, buttonTargetY - shoulderY) - 12)
+    : 132;
 
   ctx.save();
   ctx.translate(140 + bodyLean, 520);
@@ -824,14 +1000,14 @@ function drawKim() {
   ctx.fill();
 
   ctx.save();
-  ctx.translate(84, 100);
-  ctx.rotate((-12 + armLean) * (Math.PI / 180));
+  ctx.translate(shoulderX, shoulderY);
+  ctx.rotate(armAngle);
   ctx.fillStyle = "#101720";
-  roundedRect(0, 0, 132, 26, 13);
+  roundedRect(0, 0, armLength, 26, 13);
   ctx.fill();
   ctx.fillStyle = "#f2c49e";
   ctx.beginPath();
-  ctx.ellipse(134, 12, 18, 12, 0, 0, Math.PI * 2);
+  ctx.ellipse(armLength + 4, 12, pressed ? 22 : 18, pressed ? 14 : 12, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 
@@ -903,4 +1079,569 @@ function drawButton() {
   ctx.restore();
 }
 
-// __APPEND__
+function getBarStatus(index) {
+  if (state.mode === "celebration") {
+    return "sorted";
+  }
+
+  if (state.targetIndices.includes(index)) {
+    return "target";
+  }
+
+  if (index < state.stablePrefixLength) {
+    return "sorted";
+  }
+
+  if (state.phase === "scan" && index === state.scanIndex) {
+    return "scan";
+  }
+
+  return "idle";
+}
+
+function drawSingleBar(rect, value, status, options = {}) {
+  const palette = BAR_PALETTES[status] || BAR_PALETTES.idle;
+  const alpha = options.alpha ?? 1;
+  const rotation = options.rotation ?? 0;
+  const centerX = rect.x + rect.width / 2 + (options.offsetX ?? 0);
+  const centerY = rect.y + rect.height / 2 + (options.offsetY ?? 0);
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(centerX, centerY);
+  ctx.rotate(rotation);
+  ctx.translate(-rect.width / 2, -rect.height / 2);
+
+  const gradient = ctx.createLinearGradient(0, 0, 0, rect.height);
+  gradient.addColorStop(0, palette[0]);
+  gradient.addColorStop(1, palette[1]);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.fillRect(8, rect.height, Math.max(0, rect.width - 2), 10);
+
+  roundedRect(0, 0, rect.width, rect.height, Math.min(14, rect.width * 0.3));
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.strokeStyle = palette[2];
+  ctx.lineWidth = 2.2;
+  ctx.stroke();
+
+  if (status === "target" || status === "sorted") {
+    ctx.strokeStyle = status === "target" ? "rgba(255, 245, 225, 0.28)" : "rgba(235, 255, 240, 0.2)";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+  }
+
+  const fontSize = Math.max(11, Math.min(24, rect.width * 0.44));
+  ctx.fillStyle = "rgba(32, 12, 6, 0.68)";
+  ctx.font = `700 ${fontSize}px Trebuchet MS`;
+  ctx.textAlign = "center";
+  const labelY = Math.max(fontSize + 6, Math.min(rect.height - 8, fontSize + 12));
+  ctx.fillText(String(value), rect.width / 2, labelY);
+  ctx.restore();
+}
+
+function drawNormalBars() {
+  const { bars } = getSceneBars();
+  bars.forEach((entry) => {
+    drawSingleBar(entry.rect, entry.bar.value, getBarStatus(entry.index));
+  });
+}
+
+function drawTransitionBars() {
+  const transition = state.transition;
+  const amount = easeInOutCubic(transition.progress);
+
+  transition.survivorMoves.forEach((move) => {
+    drawSingleBar(interpolateRect(move.fromRect, move.toRect, amount), move.bar.value, "idle");
+  });
+
+  transition.removedMoves.forEach((move) => {
+    const fade = 1 - amount;
+    drawSingleBar(
+      {
+        x: move.fromRect.x + move.driftX * amount,
+        y: move.fromRect.y + move.driftY * amount + amount * 90,
+        width: move.fromRect.width,
+        height: Math.max(16, move.fromRect.height * (1 - amount * 0.5)),
+      },
+      move.bar.value,
+      "target",
+      {
+        alpha: fade,
+        rotation: move.rotation * amount,
+      },
+    );
+  });
+}
+
+function drawScannerBeam() {
+  if (state.mode === "celebration" || state.phase === "collapse") {
+    return;
+  }
+
+  let focusPoint = null;
+  let beamWidth = 42;
+
+  if (state.phase === "intro") {
+    const { bars } = getSceneBars();
+    if (bars.length) {
+      const firstRect = bars[0].rect;
+      focusPoint = {
+        x: firstRect.x + firstRect.width / 2,
+        y: 180,
+      };
+    }
+  } else if (state.phase === "scan") {
+    const { bars } = getSceneBars();
+    const focusIndex = Math.min(state.scanIndex, Math.max(0, bars.length - 1));
+    if (bars[focusIndex]) {
+      focusPoint = {
+        x: bars[focusIndex].rect.x + bars[focusIndex].rect.width / 2,
+        y: 180,
+      };
+      beamWidth = bars[focusIndex].rect.width * 0.8;
+    }
+  } else if (state.impactPoint) {
+    const displayYield = Math.min(state.blastYield, state.runVariant === "super" ? 8 : state.blastYield);
+    focusPoint = {
+      x: state.impactPoint.x,
+      y: 180,
+    };
+    beamWidth = 58 + displayYield * 16;
+  }
+
+  if (!focusPoint) {
+    return;
+  }
+
+  const beam = ctx.createLinearGradient(0, 170, 0, 720);
+  beam.addColorStop(0, "rgba(255, 255, 255, 0)");
+  beam.addColorStop(0.18, "rgba(255, 235, 170, 0.22)");
+  beam.addColorStop(1, "rgba(255, 235, 170, 0)");
+
+  ctx.save();
+  ctx.globalAlpha = 0.78;
+  ctx.fillStyle = beam;
+  ctx.beginPath();
+  ctx.moveTo(focusPoint.x - beamWidth, 170);
+  ctx.lineTo(focusPoint.x + beamWidth, 170);
+  ctx.lineTo(focusPoint.x + 54, 720);
+  ctx.lineTo(focusPoint.x - 54, 720);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255, 240, 186, 0.95)";
+  ctx.beginPath();
+  ctx.arc(focusPoint.x, focusPoint.y, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawTargetReticle() {
+  if (!state.targetIndices.length || !["targeting", "missile", "impact"].includes(state.phase)) {
+    return;
+  }
+
+  const { bars } = getSceneBars();
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 132, 91, 0.85)";
+  ctx.lineWidth = 3;
+  ctx.setLineDash([10, 8]);
+
+  state.targetIndices.forEach((index) => {
+    const entry = bars[index];
+    if (!entry) {
+      return;
+    }
+    const radius = Math.max(entry.rect.width * 0.75, 26);
+    ctx.beginPath();
+    ctx.arc(entry.rect.x + entry.rect.width / 2, entry.rect.y + 42, radius, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(255, 225, 192, 0.95)";
+  ctx.font = "700 20px Trebuchet MS";
+  ctx.textAlign = "center";
+  ctx.fillText(
+    state.runVariant === "super" ? "SUPER NUKE" : `DELETE x${state.targetIndices.length}`,
+    state.impactPoint.x,
+    state.impactPoint.y - 86,
+  );
+  ctx.restore();
+}
+
+function quadraticPoint(start, control, end, amount) {
+  const first = {
+    x: lerp(start.x, control.x, amount),
+    y: lerp(start.y, control.y, amount),
+  };
+  const second = {
+    x: lerp(control.x, end.x, amount),
+    y: lerp(control.y, end.y, amount),
+  };
+  return {
+    x: lerp(first.x, second.x, amount),
+    y: lerp(first.y, second.y, amount),
+  };
+}
+
+function quadraticTangent(start, control, end, amount) {
+  return {
+    x: 2 * (1 - amount) * (control.x - start.x) + 2 * amount * (end.x - control.x),
+    y: 2 * (1 - amount) * (control.y - start.y) + 2 * amount * (end.y - control.y),
+  };
+}
+
+function drawMissile() {
+  if (!state.missile) {
+    return;
+  }
+
+  const steps = 28;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 214, 124, 0.52)";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  for (let index = 0; index <= Math.floor(steps * state.missile.progress); index += 1) {
+    const point = quadraticPoint(
+      state.missile.start,
+      state.missile.control,
+      state.missile.target,
+      index / steps,
+    );
+    if (index === 0) {
+      ctx.moveTo(point.x, point.y);
+    } else {
+      ctx.lineTo(point.x, point.y);
+    }
+  }
+  ctx.stroke();
+
+  const point = quadraticPoint(state.missile.start, state.missile.control, state.missile.target, state.missile.progress);
+  const tangent = quadraticTangent(
+    state.missile.start,
+    state.missile.control,
+    state.missile.target,
+    clamp(state.missile.progress, 0.02, 1),
+  );
+  const angle = Math.atan2(tangent.y, tangent.x);
+
+  ctx.translate(point.x, point.y);
+  ctx.rotate(angle);
+
+  ctx.fillStyle = "rgba(255, 200, 82, 0.85)";
+  ctx.beginPath();
+  ctx.arc(20, 0, 12, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#ddd7cf";
+  roundedRect(-26, -8, 36, 16, 6);
+  ctx.fill();
+  ctx.fillStyle = "#d04a2b";
+  ctx.beginPath();
+  ctx.moveTo(-26, 0);
+  ctx.lineTo(-40, -8);
+  ctx.lineTo(-40, 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawImpactEffects() {
+  if (state.impactPoint && state.explosionFlash > 0) {
+    const displayYield = Math.min(state.blastYield, state.runVariant === "super" ? 8 : state.blastYield);
+    const radius = 58 + displayYield * 28;
+    const flash = ctx.createRadialGradient(
+      state.impactPoint.x,
+      state.impactPoint.y,
+      0,
+      state.impactPoint.x,
+      state.impactPoint.y,
+      radius,
+    );
+    flash.addColorStop(0, `rgba(255, 255, 255, ${0.88 * state.explosionFlash})`);
+    flash.addColorStop(0.3, `rgba(255, 210, 108, ${0.72 * state.explosionFlash})`);
+    flash.addColorStop(1, "rgba(255, 80, 50, 0)");
+    ctx.fillStyle = flash;
+    ctx.beginPath();
+    ctx.arc(state.impactPoint.x, state.impactPoint.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  state.particles.forEach((particle) => {
+    ctx.globalAlpha = Math.max(0, particle.life);
+    ctx.fillStyle = particle.color;
+    ctx.beginPath();
+    ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  state.smoke.forEach((puff) => {
+    ctx.globalAlpha = Math.max(0, Math.min(1, puff.life / 2)) * puff.alpha;
+    ctx.fillStyle = "#4f4f58";
+    ctx.beginPath();
+    ctx.arc(puff.x, puff.y, puff.radius, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawWasteCloud() {
+  if (!state.wasteCloud) {
+    return;
+  }
+
+  const amount = 1 - state.wasteCloud.life / state.wasteCloud.maxLife;
+  const alpha = Math.min(0.9, state.wasteCloud.life / state.wasteCloud.maxLife + 0.18);
+  const capRadius = 90 + amount * 160;
+  const stemHeight = 50 + amount * 170;
+  const toxicWidth = 70 + amount * 120;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(state.wasteCloud.x, state.wasteCloud.y);
+
+  const stem = ctx.createLinearGradient(0, -stemHeight, 0, stemHeight);
+  stem.addColorStop(0, "rgba(171, 255, 132, 0.86)");
+  stem.addColorStop(1, "rgba(84, 70, 31, 0.82)");
+  ctx.fillStyle = stem;
+  roundedRect(-28, -stemHeight, 56, stemHeight + 62, 22);
+  ctx.fill();
+
+  const cap = ctx.createRadialGradient(0, -stemHeight, 30, 0, -stemHeight, capRadius);
+  cap.addColorStop(0, "rgba(218, 255, 181, 0.95)");
+  cap.addColorStop(0.45, "rgba(131, 208, 89, 0.9)");
+  cap.addColorStop(1, "rgba(74, 95, 33, 0)");
+  ctx.fillStyle = cap;
+
+  [
+    { x: 0, y: -stemHeight, r: capRadius },
+    { x: -capRadius * 0.42, y: -stemHeight + 24, r: capRadius * 0.62 },
+    { x: capRadius * 0.45, y: -stemHeight + 22, r: capRadius * 0.58 },
+    { x: 0, y: -stemHeight - capRadius * 0.26, r: capRadius * 0.5 },
+  ].forEach((puff) => {
+    ctx.beginPath();
+    ctx.arc(puff.x, puff.y, puff.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.fillStyle = "rgba(128, 255, 142, 0.26)";
+  ctx.beginPath();
+  ctx.ellipse(0, 148, toxicWidth, 24 + amount * 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawConfetti() {
+  state.confetti.forEach((piece) => {
+    ctx.save();
+    ctx.translate(piece.x, piece.y);
+    ctx.rotate(piece.spin);
+    ctx.fillStyle = piece.color;
+    ctx.fillRect(-piece.size / 2, -piece.size / 2, piece.size, piece.size * 0.55);
+    ctx.restore();
+  });
+}
+
+function drawLabels() {
+  ctx.fillStyle = "#fff0d4";
+  ctx.font = "900 48px Impact";
+  ctx.textAlign = "left";
+  ctx.fillText("North Korea Sort", 64, 96);
+
+  ctx.font = "600 22px Trebuchet MS";
+  ctx.fillStyle = "rgba(255, 239, 208, 0.8)";
+  ctx.fillText(
+    state.runVariant === "super"
+      ? "Super nuke mode: one giant strike, mushroom waste, then back to normal"
+      : "Left-side checks, right-side missiles, and zero swaps",
+    66,
+    130,
+  );
+
+  ctx.fillStyle = "rgba(255, 245, 219, 0.92)";
+  ctx.font = "700 24px Trebuchet MS";
+  ctx.fillText("Kill zone", 505, 172);
+
+  const phaseLabel =
+    state.mode === "celebration"
+      ? "Celebration"
+      : state.phase === "intro"
+        ? "Preparing"
+        : state.phase === "scan"
+          ? "Left scan"
+          : state.phase === "targeting"
+            ? "Target lock"
+            : state.phase === "missile"
+              ? "Missile flight"
+              : state.phase === "impact"
+                ? "Detonation"
+                : "Collapse";
+
+  ctx.fillStyle = "rgba(255, 214, 124, 0.94)";
+  ctx.font = "700 28px Trebuchet MS";
+  ctx.textAlign = "right";
+  ctx.fillText(phaseLabel, WIDTH - 70, 104);
+}
+
+function render() {
+  ctx.clearRect(0, 0, WIDTH, HEIGHT);
+  drawBackground();
+  drawStageFrame();
+  drawScannerBeam();
+  drawTargetReticle();
+
+  if (state.phase === "collapse" && state.transition) {
+    drawTransitionBars();
+  } else {
+    drawNormalBars();
+  }
+
+  drawImpactEffects();
+  drawWasteCloud();
+  drawMissile();
+  drawKim();
+  drawButton();
+  drawLabels();
+
+  if (state.mode === "celebration") {
+    drawConfetti();
+  }
+
+  if (debugStateNode) {
+    debugStateNode.textContent = renderGameToText();
+  }
+}
+
+function renderGameToText() {
+  const { bars } = getSceneBars();
+  const payload = {
+    coordinate_system: "Origin is top-left of a 1400x900 canvas, x grows right and y grows down.",
+    mode: state.mode,
+    phase: state.phase,
+    run_variant: state.runVariant,
+    ending_variant: state.endingVariant,
+    speed: state.speed,
+    sound_enabled: state.soundEnabled,
+    zero_swaps: true,
+    initial_bar_count: state.initialBarCount,
+    active_count: state.activeBars.length,
+    destroyed_count: destroyedCount(),
+    stable_prefix_length: state.stablePrefixLength,
+    scan_index: state.scanIndex,
+    threshold_value: state.thresholdValue,
+    target_indices: [...state.targetIndices],
+    blast_yield: state.blastYield,
+    missile: state.missile
+      ? {
+          progress: Number(state.missile.progress.toFixed(3)),
+          target_x: Math.round(state.missile.target.x),
+          target_y: Math.round(state.missile.target.y),
+          origin: "right",
+        }
+      : null,
+    waste_cloud: state.wasteCloud
+      ? {
+          x: Math.round(state.wasteCloud.x),
+          y: Math.round(state.wasteCloud.y),
+          life: Number(state.wasteCloud.life.toFixed(2)),
+        }
+      : null,
+    active_bars: bars.map((entry) => ({
+      index: entry.index,
+      value: entry.bar.value,
+      x: Math.round(entry.rect.x),
+      y: Math.round(entry.rect.y),
+      width: Math.round(entry.rect.width),
+      height: Math.round(entry.rect.height),
+      status: getBarStatus(entry.index),
+    })),
+  };
+
+  return JSON.stringify(payload);
+}
+
+function animate(timestamp) {
+  const dt = Math.min(0.05, (timestamp - lastTimestamp) / 1000);
+  lastTimestamp = timestamp;
+  update(dt);
+  render();
+  requestAnimationFrame(animate);
+}
+
+window.render_game_to_text = renderGameToText;
+window.advanceTime = (ms) => {
+  const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+  for (let index = 0; index < steps; index += 1) {
+    update(1 / 60);
+  }
+  lastTimestamp = performance.now();
+  render();
+};
+
+barCountInput.value = String(clamp(Math.round(Number(urlParams.get("bars")) || DEFAULT_BAR_COUNT), MIN_BAR_COUNT, MAX_BAR_COUNT));
+speedInput.value = String(clamp(Number(urlParams.get("speed")) || 1, 0.5, 3));
+state.speed = clamp(Number(speedInput.value), 0.5, 3);
+state.soundEnabled = urlParams.get("sound") !== "0";
+
+speedInput.addEventListener("input", () => {
+  state.speed = clamp(Number(speedInput.value) || 1, 0.5, 3);
+  updateSpeedLabel();
+  refreshDetail();
+});
+
+barCountInput.addEventListener("change", () => {
+  unlockAudio();
+  initializeSimulation();
+});
+
+resetBtn.addEventListener("click", () => {
+  unlockAudio();
+  initializeSimulation();
+});
+
+superNukeBtn.addEventListener("click", () => {
+  unlockAudio();
+  initializeSimulation("super");
+});
+
+restartBtn.addEventListener("click", () => {
+  unlockAudio();
+  initializeSimulation();
+});
+
+soundBtn.addEventListener("click", () => {
+  state.soundEnabled = !state.soundEnabled;
+  if (state.soundEnabled) {
+    unlockAudio();
+  } else if (state.audioContext && state.audioContext.state === "running") {
+    state.audioContext.suspend().catch(() => {});
+    updateSoundButton();
+  } else {
+    updateSoundButton();
+  }
+});
+
+document.addEventListener(
+  "pointerdown",
+  () => {
+    unlockAudio();
+  },
+  { passive: true },
+);
+
+updateSpeedLabel();
+updateSoundButton();
+initializeSimulation(urlParams.get("variant") === "super" ? "super" : "normal");
+render();
+requestAnimationFrame(animate);
+
+if (Number.isFinite(requestedAdvance) && requestedAdvance > 0) {
+  window.setTimeout(() => {
+    window.advanceTime(requestedAdvance);
+  }, 0);
+}
