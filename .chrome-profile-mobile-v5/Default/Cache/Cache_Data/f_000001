@@ -1,0 +1,1428 @@
+const canvas = document.getElementById("sort-canvas");
+const ctx = canvas.getContext("2d");
+const statusText = document.getElementById("status-text");
+const detailText = document.getElementById("detail-text");
+const victoryPanel = document.getElementById("victory-panel");
+const restartBtn = document.getElementById("restart-btn");
+const resetBtn = document.getElementById("reset-btn");
+const soundBtn = document.getElementById("sound-btn");
+const barCountInput = document.getElementById("bar-count-input");
+const speedInput = document.getElementById("speed-input");
+const speedReadout = document.getElementById("speed-readout");
+
+const WIDTH = 1400;
+const HEIGHT = 900;
+const DEFAULT_BAR_COUNT = 14;
+const MIN_BAR_COUNT = 6;
+const MAX_BAR_COUNT = 24;
+const BAR_MIN = 18;
+const BAR_MAX = 100;
+const MAX_YIELD = 4;
+const BUTTON_POINT = { x: 346, y: 566 };
+const TIMINGS = {
+  intro: 0.8,
+  scanStep: 0.18,
+  targeting: 0.85,
+  launch: 0.95,
+  impact: 0.38,
+  collapse: 0.95,
+};
+
+const BAR_PALETTES = {
+  idle: ["#f2e8cd", "#8f7d56", "rgba(255, 255, 255, 0.18)"],
+  inspected: ["#d8f4db", "#69ab80", "rgba(195, 255, 212, 0.45)"],
+  scan: ["#fff9c9", "#ffc445", "rgba(255, 248, 181, 0.85)"],
+  candidate: ["#fff5b6", "#ff9e2f", "rgba(255, 225, 132, 0.85)"],
+  target: ["#ff9d92", "#d31813", "rgba(255, 160, 147, 0.85)"],
+  candidateTarget: ["#ffe3a3", "#ff6f2c", "rgba(255, 214, 138, 0.92)"],
+  sorted: ["#98efb6", "#35c86b", "rgba(197, 255, 214, 0.55)"],
+  promoted: ["#ffe29c", "#ffb33a", "rgba(255, 236, 169, 0.95)"],
+};
+
+const urlParams = new URLSearchParams(window.location.search);
+const requestedAdvance = Number(urlParams.get("advance"));
+
+let nextBarId = 1;
+let lastTimestamp = performance.now();
+
+const state = {
+  mode: "running",
+  phase: "intro",
+  initialBarCount: 14,
+  activeBars: [],
+  sortedBars: [],
+  scanIndex: -1,
+  candidateIndex: null,
+  targetIndices: [],
+  blastYield: 0,
+  timer: 0,
+  speed: 1,
+  soundEnabled: true,
+  lastStatus: "",
+  lastDetail: "",
+  particles: [],
+  smoke: [],
+  confetti: [],
+  celebrationPulse: 0,
+  missile: null,
+  impactPoint: null,
+  transition: null,
+  pendingPlacement: null,
+  explosionFlash: 0,
+  audioContext: null,
+};
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function shuffle(items) {
+  const copy = [...items];
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomInt(0, index);
+    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+  }
+  return copy;
+}
+
+function lerp(start, end, amount) {
+  return start + (end - start) * amount;
+}
+
+function easeInOutCubic(amount) {
+  if (amount < 0.5) {
+    return 4 * amount * amount * amount;
+  }
+  return 1 - Math.pow(-2 * amount + 2, 3) / 2;
+}
+
+function readBarCount() {
+  const nextValue = clamp(
+    Math.round(Number(barCountInput.value) || DEFAULT_BAR_COUNT),
+    MIN_BAR_COUNT,
+    MAX_BAR_COUNT,
+  );
+  barCountInput.value = String(nextValue);
+  return nextValue;
+}
+
+function setStatus(message) {
+  if (message !== state.lastStatus) {
+    state.lastStatus = message;
+    statusText.textContent = message;
+  }
+}
+
+function setDetail(message) {
+  if (message !== state.lastDetail) {
+    state.lastDetail = message;
+    detailText.textContent = message;
+  }
+}
+
+function destroyedCount() {
+  return state.initialBarCount - (state.activeBars.length + state.sortedBars.length + (state.pendingPlacement ? 1 : 0));
+}
+
+function refreshDetail(extra = "") {
+  const yieldText = state.blastYield ? `Yield ${state.blastYield}` : "Yield standby";
+  const base = `${yieldText} | Active ${state.activeBars.length} | Sorted-right ${state.sortedBars.length} | Lost ${destroyedCount()}`;
+  setDetail(extra ? `${base} | ${extra}` : base);
+}
+
+function updateSpeedLabel() {
+  speedReadout.textContent = `${state.speed.toFixed(2)}x`;
+}
+
+function updateSoundButton() {
+  if (!state.soundEnabled) {
+    soundBtn.textContent = "Sound Off";
+    return;
+  }
+  const audioReady = state.audioContext && state.audioContext.state === "running";
+  soundBtn.textContent = audioReady ? "Sound On" : "Arm Sound";
+}
+
+function getAudioContext() {
+  if (!state.soundEnabled) {
+    return null;
+  }
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    return null;
+  }
+  if (!state.audioContext) {
+    state.audioContext = new AudioContextClass();
+  }
+  return state.audioContext;
+}
+
+function unlockAudio() {
+  const audioContext = getAudioContext();
+  if (!audioContext || audioContext.state === "running") {
+    updateSoundButton();
+    return Promise.resolve();
+  }
+  return audioContext.resume().catch(() => {}).finally(() => {
+    updateSoundButton();
+  });
+}
+
+function playTone({
+  frequency,
+  endFrequency = frequency,
+  duration = 0.15,
+  volume = 0.04,
+  type = "triangle",
+  attack = 0.01,
+  release = 0.04,
+}) {
+  const audioContext = getAudioContext();
+  if (!audioContext || audioContext.state !== "running") {
+    return;
+  }
+
+  const oscillator = audioContext.createOscillator();
+  const gainNode = audioContext.createGain();
+  const now = audioContext.currentTime;
+  const endTime = now + duration;
+
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(frequency, now);
+  oscillator.frequency.linearRampToValueAtTime(endFrequency, endTime);
+
+  gainNode.gain.setValueAtTime(0.0001, now);
+  gainNode.gain.exponentialRampToValueAtTime(volume, now + attack);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, Math.max(now + attack + 0.01, endTime - release));
+
+  oscillator.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+  oscillator.start(now);
+  oscillator.stop(endTime);
+}
+
+function playNoise(duration = 0.2, volume = 0.05) {
+  const audioContext = getAudioContext();
+  if (!audioContext || audioContext.state !== "running") {
+    return;
+  }
+
+  const buffer = audioContext.createBuffer(1, Math.floor(audioContext.sampleRate * duration), audioContext.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let index = 0; index < data.length; index += 1) {
+    data[index] = (Math.random() * 2 - 1) * (1 - index / data.length);
+  }
+
+  const source = audioContext.createBufferSource();
+  const gainNode = audioContext.createGain();
+  const now = audioContext.currentTime;
+
+  source.buffer = buffer;
+  gainNode.gain.setValueAtTime(volume, now);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+  source.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+  source.start(now);
+  source.stop(now + duration);
+}
+
+function playScanSound() {
+  playTone({ frequency: 580, endFrequency: 430, duration: 0.08, volume: 0.025 });
+}
+
+function playLaunchSound(yieldSize) {
+  playTone({
+    frequency: 180 + yieldSize * 18,
+    endFrequency: 520 + yieldSize * 36,
+    duration: 0.36,
+    volume: 0.05,
+    type: "sawtooth",
+  });
+  playTone({
+    frequency: 320 + yieldSize * 24,
+    endFrequency: 730 + yieldSize * 42,
+    duration: 0.28,
+    volume: 0.03,
+    type: "triangle",
+  });
+}
+
+function playImpactSound(yieldSize) {
+  playNoise(0.24 + yieldSize * 0.04, 0.05 + yieldSize * 0.01);
+  playTone({
+    frequency: 92 + yieldSize * 6,
+    endFrequency: 42,
+    duration: 0.42,
+    volume: 0.07,
+    type: "sine",
+  });
+}
+
+function playPlacementSound(value) {
+  playTone({
+    frequency: 320 + value * 1.4,
+    endFrequency: 520 + value * 1.4,
+    duration: 0.18,
+    volume: 0.045,
+  });
+}
+
+function playVictoryFanfare() {
+  [
+    { frequency: 523, endFrequency: 523, duration: 0.14, volume: 0.05 },
+    { frequency: 659, endFrequency: 659, duration: 0.14, volume: 0.05 },
+    { frequency: 784, endFrequency: 784, duration: 0.22, volume: 0.06 },
+  ].forEach((note, index) => {
+    window.setTimeout(() => playTone(note), index * 110);
+  });
+}
+
+function buildBars(count) {
+  const values = shuffle(
+    Array.from({ length: BAR_MAX - BAR_MIN + 1 }, (_, index) => BAR_MIN + index),
+  ).slice(0, count);
+
+  return values.map((value) => ({
+    id: nextBarId++,
+    value,
+  }));
+}
+
+function createLayout(totalCount) {
+  const count = Math.max(1, totalCount);
+  const x = 505;
+  const y = 735;
+  const width = 765;
+  const gap = count <= 10 ? 14 : count <= 16 ? 12 : 8;
+  const barWidth = (width - gap * (count - 1)) / count;
+  const maxHeight = 420;
+  return { x, y, width, gap, barWidth, maxHeight };
+}
+
+function getBarRect(layout, slotIndex, value) {
+  const height = (value / BAR_MAX) * layout.maxHeight;
+  return {
+    x: layout.x + slotIndex * (layout.barWidth + layout.gap),
+    y: layout.y - height,
+    width: layout.barWidth,
+    height,
+  };
+}
+
+function getNormalSceneBars() {
+  const total = Math.max(1, state.activeBars.length + state.sortedBars.length);
+  const layout = createLayout(total);
+  const active = state.activeBars.map((bar, index) => ({
+    bar,
+    rect: getBarRect(layout, index, bar.value),
+    index,
+  }));
+  const sorted = state.sortedBars.map((bar, index) => {
+    const slot = total - 1 - index;
+    return {
+      bar,
+      rect: getBarRect(layout, slot, bar.value),
+      index,
+    };
+  });
+  return { total, layout, active, sorted };
+}
+
+function getImpactPoint(targetIndices) {
+  const { active } = getNormalSceneBars();
+  const targetRects = targetIndices.map((index) => active[index].rect);
+  const left = Math.min(...targetRects.map((rect) => rect.x));
+  const right = Math.max(...targetRects.map((rect) => rect.x + rect.width));
+  const top = Math.min(...targetRects.map((rect) => rect.y));
+  const bottom = Math.max(...targetRects.map((rect) => rect.y + rect.height * 0.38));
+  return {
+    x: (left + right) * 0.5,
+    y: (top + bottom) * 0.5,
+  };
+}
+
+function chooseTargetIndices(candidateIndex, yieldSize, count) {
+  const size = Math.min(yieldSize, count);
+  const startMin = Math.max(0, candidateIndex - size + 1);
+  const startMax = Math.min(candidateIndex, count - size);
+  const start = randomInt(startMin, startMax);
+  return Array.from({ length: size }, (_, offset) => start + offset);
+}
+
+function startScanPhase() {
+  if (!state.activeBars.length) {
+    completeSort();
+    return;
+  }
+
+  state.phase = "scan";
+  state.timer = 0;
+  state.scanIndex = state.activeBars.length - 1;
+  state.candidateIndex = null;
+  state.targetIndices = [];
+  state.blastYield = 0;
+  state.missile = null;
+  state.impactPoint = null;
+  state.transition = null;
+  state.pendingPlacement = null;
+  setStatus("The inspector sweeps from right to left to save the tallest remaining bar.");
+  refreshDetail();
+}
+
+function scanOneBar() {
+  if (state.scanIndex < 0) {
+    lockTargets();
+    return;
+  }
+
+  if (
+    state.candidateIndex === null ||
+    state.activeBars[state.scanIndex].value > state.activeBars[state.candidateIndex].value
+  ) {
+    state.candidateIndex = state.scanIndex;
+  }
+
+  playScanSound();
+  refreshDetail(`Best survivor ${state.activeBars[state.candidateIndex].value}`);
+  state.scanIndex -= 1;
+
+  if (state.scanIndex < 0) {
+    lockTargets();
+  }
+}
+
+function lockTargets() {
+  state.phase = "targeting";
+  state.timer = 0;
+  state.blastYield = randomInt(1, Math.min(MAX_YIELD, state.activeBars.length));
+  state.targetIndices = chooseTargetIndices(state.candidateIndex, state.blastYield, state.activeBars.length);
+  state.impactPoint = getImpactPoint(state.targetIndices);
+  setStatus(
+    `Random yield ${state.blastYield} locks onto ${state.targetIndices.length} bars around value ${state.activeBars[state.candidateIndex].value}.`,
+  );
+  refreshDetail(`Locking ${state.activeBars[state.candidateIndex].value}`);
+}
+
+function createMissile() {
+  const start = { x: BUTTON_POINT.x, y: BUTTON_POINT.y - 10 };
+  const target = { ...state.impactPoint };
+  const control = {
+    x: lerp(start.x, target.x, 0.46),
+    y: Math.min(start.y, target.y) - 160 - state.blastYield * 26,
+  };
+  return { start, control, target, progress: 0 };
+}
+
+function launchMissile() {
+  state.phase = "missile";
+  state.timer = 0;
+  state.missile = createMissile();
+  playLaunchSound(state.blastYield);
+  setStatus("The nuke is in the air and heading for the locked zone.");
+  refreshDetail(`Airborne yield ${state.blastYield}`);
+}
+
+function spawnImpactEffects(point, yieldSize) {
+  const particleCount = 28 + yieldSize * 12;
+  for (let index = 0; index < particleCount; index += 1) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 110 + Math.random() * (150 + yieldSize * 28);
+    state.particles.push({
+      x: point.x,
+      y: point.y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 60,
+      life: 0.55 + Math.random() * 0.55,
+      size: 7 + Math.random() * (16 + yieldSize * 2),
+      color: index % 3 === 0 ? "#ffe17f" : index % 3 === 1 ? "#ff715f" : "#ffffff",
+    });
+  }
+
+  for (let index = 0; index < 6 + yieldSize; index += 1) {
+    state.smoke.push({
+      x: point.x + randomInt(-50, 50),
+      y: point.y + randomInt(-30, 30),
+      vx: randomInt(-30, 30),
+      vy: -18 - Math.random() * 34,
+      life: 1.1 + Math.random() * 0.7,
+      radius: 24 + Math.random() * (18 + yieldSize * 3),
+      alpha: 0.4 + Math.random() * 0.18,
+    });
+  }
+}
+
+function enterImpactPhase() {
+  state.phase = "impact";
+  state.timer = 0;
+  state.explosionFlash = 1;
+  state.missile = null;
+  spawnImpactEffects(state.impactPoint, state.blastYield);
+  playImpactSound(state.blastYield);
+  setStatus("Direct hit. The blast eats through the whole locked zone.");
+  refreshDetail(`Blast width ${state.targetIndices.length}`);
+}
+
+function beginCollapseTransition() {
+  const hitSet = new Set(state.targetIndices);
+  const oldActive = state.activeBars;
+  const oldSorted = state.sortedBars;
+  const oldTotal = Math.max(1, oldActive.length + oldSorted.length);
+  const oldLayout = createLayout(oldTotal);
+  const candidateBar = oldActive[state.candidateIndex];
+  const survivors = [];
+  const removed = [];
+
+  oldActive.forEach((bar, index) => {
+    if (hitSet.has(index)) {
+      if (index !== state.candidateIndex) {
+        removed.push({ bar, index });
+      }
+      return;
+    }
+
+    survivors.push({ bar, index });
+  });
+
+  const newTotal = Math.max(1, survivors.length + oldSorted.length + 1);
+  const newLayout = createLayout(newTotal);
+  const promotedSlot = newTotal - 1 - oldSorted.length;
+
+  state.transition = {
+    progress: 0,
+    activeMoves: survivors.map((entry, newIndex) => ({
+      bar: entry.bar,
+      fromRect: getBarRect(oldLayout, entry.index, entry.bar.value),
+      toRect: getBarRect(newLayout, newIndex, entry.bar.value),
+    })),
+    sortedMoves: oldSorted.map((bar, index) => ({
+      bar,
+      fromRect: getBarRect(oldLayout, oldTotal - 1 - index, bar.value),
+      toRect: getBarRect(newLayout, newTotal - 1 - index, bar.value),
+    })),
+    removedMoves: removed.map((entry) => ({
+      bar: entry.bar,
+      fromRect: getBarRect(oldLayout, entry.index, entry.bar.value),
+      driftX: randomInt(-86, 86),
+      driftY: -30 - randomInt(0, 58),
+      rotation: -0.35 + Math.random() * 0.7,
+    })),
+    promotedMove: {
+      bar: candidateBar,
+      fromRect: getBarRect(oldLayout, state.candidateIndex, candidateBar.value),
+      toRect: getBarRect(newLayout, promotedSlot, candidateBar.value),
+    },
+  };
+
+  state.pendingPlacement = candidateBar;
+  state.activeBars = survivors.map((entry) => entry.bar);
+  state.phase = "collapse";
+  state.timer = 0;
+  setStatus("The nuked bars disappear, the queue closes up, and the rescued bar joins the right frontier.");
+  refreshDetail(`Promoting ${candidateBar.value}`);
+}
+
+function spawnConfettiBurst() {
+  for (let index = 0; index < 8; index += 1) {
+    state.confetti.push({
+      x: randomInt(430, 1280),
+      y: -20 - Math.random() * 80,
+      vx: -60 + Math.random() * 120,
+      vy: 90 + Math.random() * 120,
+      spin: Math.random() * Math.PI,
+      spinVelocity: -5 + Math.random() * 10,
+      life: 2 + Math.random() * 1.2,
+      size: 10 + Math.random() * 14,
+      color: ["#42d77c", "#ffe17f", "#ff5d55", "#8de8ff"][index % 4],
+    });
+  }
+}
+
+function completeSort() {
+  state.mode = "celebration";
+  state.phase = "celebration";
+  state.timer = 0;
+  victoryPanel.classList.remove("hidden");
+  spawnConfettiBurst();
+  playVictoryFanfare();
+  setStatus("The surviving bars are fully sorted from the right edge inward.");
+  refreshDetail("Celebration mode");
+}
+
+function finalizeCollapse() {
+  if (state.pendingPlacement) {
+    state.sortedBars.push(state.pendingPlacement);
+    playPlacementSound(state.pendingPlacement.value);
+  }
+
+  state.pendingPlacement = null;
+  state.transition = null;
+  state.targetIndices = [];
+  state.blastYield = 0;
+  state.candidateIndex = null;
+  state.scanIndex = state.activeBars.length - 1;
+  state.impactPoint = null;
+  state.explosionFlash = 0;
+
+  if (!state.activeBars.length) {
+    completeSort();
+    return;
+  }
+
+  startScanPhase();
+}
+
+function initializeSimulation() {
+  state.initialBarCount = readBarCount();
+  state.mode = "running";
+  state.phase = "intro";
+  state.timer = 0;
+  state.activeBars = buildBars(state.initialBarCount);
+  state.sortedBars = [];
+  state.scanIndex = state.activeBars.length - 1;
+  state.candidateIndex = null;
+  state.targetIndices = [];
+  state.blastYield = 0;
+  state.particles = [];
+  state.smoke = [];
+  state.confetti = [];
+  state.celebrationPulse = 0;
+  state.missile = null;
+  state.impactPoint = null;
+  state.transition = null;
+  state.pendingPlacement = null;
+  state.explosionFlash = 0;
+  victoryPanel.classList.add("hidden");
+  setStatus("Kim Jong Un lines up a new queue and stares down the bars to his right.");
+  refreshDetail();
+}
+
+function updateParticles(collection, dt, gravity = 0) {
+  for (let index = collection.length - 1; index >= 0; index -= 1) {
+    const particle = collection[index];
+    particle.life -= dt;
+
+    if (particle.life <= 0) {
+      collection.splice(index, 1);
+      continue;
+    }
+
+    particle.x += particle.vx * dt;
+    particle.y += particle.vy * dt;
+    particle.vy += gravity * dt;
+  }
+}
+
+function updateSmoke(dt) {
+  for (let index = state.smoke.length - 1; index >= 0; index -= 1) {
+    const puff = state.smoke[index];
+    puff.life -= dt;
+
+    if (puff.life <= 0) {
+      state.smoke.splice(index, 1);
+      continue;
+    }
+
+    puff.x += puff.vx * dt;
+    puff.y += puff.vy * dt;
+    puff.radius += 16 * dt;
+  }
+}
+
+function updateConfetti(dt) {
+  state.celebrationPulse += dt;
+  if (state.celebrationPulse >= 0.12) {
+    state.celebrationPulse = 0;
+    spawnConfettiBurst();
+  }
+
+  for (let index = state.confetti.length - 1; index >= 0; index -= 1) {
+    const piece = state.confetti[index];
+    piece.life -= dt;
+
+    if (piece.life <= 0 || piece.y > HEIGHT + 80) {
+      state.confetti.splice(index, 1);
+      continue;
+    }
+
+    piece.x += piece.vx * dt;
+    piece.y += piece.vy * dt;
+    piece.spin += piece.spinVelocity * dt;
+    piece.vy += 20 * dt;
+  }
+}
+
+function updateAlgorithm(dt) {
+  state.timer += dt;
+  state.explosionFlash = Math.max(0, state.explosionFlash - dt * 2.3);
+
+  if (state.phase === "intro") {
+    setStatus("The right-side inspector is about to start a destructive right-to-left sort.");
+    refreshDetail();
+    if (state.timer >= TIMINGS.intro) {
+      startScanPhase();
+    }
+    return;
+  }
+
+  if (state.phase === "scan") {
+    while (state.timer >= TIMINGS.scanStep) {
+      state.timer -= TIMINGS.scanStep;
+      scanOneBar();
+      if (state.phase !== "scan") {
+        break;
+      }
+    }
+    return;
+  }
+
+  if (state.phase === "targeting" && state.timer >= TIMINGS.targeting) {
+    launchMissile();
+    return;
+  }
+
+  if (state.phase === "missile") {
+    state.missile.progress = Math.min(1, state.timer / TIMINGS.launch);
+    if (state.timer >= TIMINGS.launch) {
+      enterImpactPhase();
+    }
+    return;
+  }
+
+  if (state.phase === "impact" && state.timer >= TIMINGS.impact) {
+    beginCollapseTransition();
+    return;
+  }
+
+  if (state.phase === "collapse") {
+    state.transition.progress = Math.min(1, state.timer / TIMINGS.collapse);
+    if (state.timer >= TIMINGS.collapse) {
+      finalizeCollapse();
+    }
+  }
+}
+
+function update(dt) {
+  const scaledDt = dt * state.speed;
+  updateParticles(state.particles, scaledDt, 260);
+  updateSmoke(scaledDt);
+
+  if (state.mode === "celebration") {
+    updateConfetti(scaledDt);
+    return;
+  }
+
+  updateAlgorithm(scaledDt);
+}
+
+function roundedRect(x, y, width, height, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function interpolateRect(fromRect, toRect, amount) {
+  return {
+    x: lerp(fromRect.x, toRect.x, amount),
+    y: lerp(fromRect.y, toRect.y, amount),
+    width: lerp(fromRect.width, toRect.width, amount),
+    height: lerp(fromRect.height, toRect.height, amount),
+  };
+}
+
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, HEIGHT);
+  sky.addColorStop(0, "#5e1211");
+  sky.addColorStop(0.45, "#2c0d0d");
+  sky.addColorStop(1, "#140707");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  const glow = ctx.createRadialGradient(980, 140, 40, 980, 140, 360);
+  glow.addColorStop(0, "rgba(255, 180, 70, 0.42)");
+  glow.addColorStop(1, "rgba(255, 180, 70, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  for (let index = 0; index < 24; index += 1) {
+    const x = 540 + index * 32;
+    const alpha = index % 3 === 0 ? 0.08 : 0.04;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.fillRect(x, 68, 3, 460);
+  }
+
+  ctx.fillStyle = "#20110c";
+  ctx.fillRect(0, 720, WIDTH, 180);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+  ctx.fillRect(0, 700, WIDTH, 20);
+}
+
+function drawStageFrame() {
+  ctx.save();
+  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+  roundedRect(34, 32, WIDTH - 68, HEIGHT - 64, 28);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 196, 104, 0.22)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawKim() {
+  const pressed = ["targeting", "missile", "impact"].includes(state.phase);
+  const bodyLean = pressed ? 12 : 0;
+  const armLean = pressed ? 26 : 0;
+
+  ctx.save();
+  ctx.translate(140 + bodyLean, 520);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.beginPath();
+  ctx.ellipse(24, 224, 128, 28, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#101720";
+  roundedRect(-14, 60, 126, 172, 30);
+  ctx.fill();
+
+  ctx.fillStyle = "#f2c49e";
+  ctx.beginPath();
+  ctx.arc(36, 18, 48, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#0b0b0e";
+  ctx.beginPath();
+  ctx.moveTo(-6, 2);
+  ctx.quadraticCurveTo(0, -42, 50, -40);
+  ctx.quadraticCurveTo(94, -36, 86, 10);
+  ctx.quadraticCurveTo(36, 4, -6, 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#44261a";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(60, 20);
+  ctx.lineTo(70, 22);
+  ctx.stroke();
+
+  ctx.strokeStyle = "#23130b";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(44, 34);
+  ctx.lineTo(78, 32);
+  ctx.stroke();
+
+  ctx.fillStyle = "#1d2530";
+  roundedRect(-20, 110, 58, 86, 24);
+  ctx.fill();
+  roundedRect(74, 110, 58, 86, 24);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(84, 100);
+  ctx.rotate((-12 + armLean) * (Math.PI / 180));
+  ctx.fillStyle = "#101720";
+  roundedRect(0, 0, 132, 26, 13);
+  ctx.fill();
+  ctx.fillStyle = "#f2c49e";
+  ctx.beginPath();
+  ctx.ellipse(134, 12, 18, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = "#101720";
+  roundedRect(8, 220, 40, 118, 18);
+  ctx.fill();
+  roundedRect(64, 220, 40, 118, 18);
+  ctx.fill();
+
+  ctx.fillStyle = "#0c1016";
+  roundedRect(-8, 326, 58, 22, 12);
+  ctx.fill();
+  roundedRect(56, 326, 58, 22, 12);
+  ctx.fill();
+
+  ctx.fillStyle = "#fff1dc";
+  ctx.font = "600 24px Trebuchet MS";
+  ctx.textAlign = "left";
+  ctx.fillText("Kim Jong Un", -36, 244);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+  ctx.font = "500 18px Trebuchet MS";
+  ctx.fillText("destructive sorter", -24, 268);
+  ctx.restore();
+}
+
+function drawButton() {
+  const pressed = ["targeting", "missile", "impact"].includes(state.phase);
+  const pulse = pressed ? 0.95 : 1 + Math.sin(performance.now() / 320) * 0.02;
+
+  ctx.save();
+  ctx.translate(BUTTON_POINT.x, BUTTON_POINT.y);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+  ctx.beginPath();
+  ctx.ellipse(0, 26, 98, 20, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#4d4d52";
+  roundedRect(-82, -6, 160, 54, 20);
+  ctx.fill();
+
+  ctx.scale(pulse, pressed ? 0.9 : 1);
+  const glow = ctx.createRadialGradient(0, 2, 0, 0, 2, 74);
+  glow.addColorStop(0, pressed ? "rgba(255, 245, 150, 0.65)" : "rgba(255, 119, 103, 0.26)");
+  glow.addColorStop(1, "rgba(255, 80, 56, 0)");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 2, 74, 0, Math.PI * 2);
+  ctx.fill();
+
+  const buttonGradient = ctx.createLinearGradient(0, -30, 0, 30);
+  buttonGradient.addColorStop(0, "#ff8c79");
+  buttonGradient.addColorStop(1, "#b1120e");
+  ctx.fillStyle = buttonGradient;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 62, 34, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 62, 34, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "#fff5ea";
+  ctx.font = "800 22px Trebuchet MS";
+  ctx.textAlign = "center";
+  ctx.fillText("NUKE", 0, 8);
+  ctx.restore();
+}
+
+function getActiveBarStatus(index) {
+  if (state.phase === "scan") {
+    if (index === state.scanIndex) {
+      return "scan";
+    }
+    if (index === state.candidateIndex) {
+      return "candidate";
+    }
+    if (index > state.scanIndex) {
+      return "inspected";
+    }
+  }
+
+  if (["targeting", "missile", "impact"].includes(state.phase)) {
+    if (state.targetIndices.includes(index)) {
+      return index === state.candidateIndex ? "candidateTarget" : "target";
+    }
+    if (index === state.candidateIndex) {
+      return "candidate";
+    }
+  }
+
+  return "idle";
+}
+
+function drawSingleBar(rect, value, status, options = {}) {
+  const palette = BAR_PALETTES[status] || BAR_PALETTES.idle;
+  const alpha = options.alpha ?? 1;
+  const rotation = options.rotation ?? 0;
+  const centerX = rect.x + rect.width / 2 + (options.offsetX ?? 0);
+  const centerY = rect.y + rect.height / 2 + (options.offsetY ?? 0);
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(centerX, centerY);
+  ctx.rotate(rotation);
+  ctx.translate(-rect.width / 2, -rect.height / 2);
+
+  const gradient = ctx.createLinearGradient(0, 0, 0, rect.height);
+  gradient.addColorStop(0, palette[0]);
+  gradient.addColorStop(1, palette[1]);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.fillRect(8, rect.height, Math.max(0, rect.width - 2), 10);
+
+  roundedRect(0, 0, rect.width, rect.height, Math.min(14, rect.width * 0.3));
+  ctx.fillStyle = gradient;
+  ctx.fill();
+  ctx.strokeStyle = palette[2];
+  ctx.lineWidth = 2.2;
+  ctx.stroke();
+
+  if (status === "target" || status === "candidateTarget") {
+    ctx.strokeStyle = "rgba(255, 245, 225, 0.28)";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+  }
+
+  if (status === "sorted" || status === "promoted") {
+    ctx.strokeStyle = "rgba(235, 255, 240, 0.2)";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+  }
+
+  const fontSize = Math.max(11, Math.min(24, rect.width * 0.44));
+  ctx.fillStyle = "rgba(32, 12, 6, 0.68)";
+  ctx.font = `700 ${fontSize}px Trebuchet MS`;
+  ctx.textAlign = "center";
+  const labelY = Math.max(fontSize + 6, Math.min(rect.height - 8, fontSize + 12));
+  ctx.fillText(String(value), rect.width / 2, labelY);
+  ctx.restore();
+}
+
+function drawNormalBars() {
+  const { active, sorted } = getNormalSceneBars();
+  sorted.forEach((entry) => {
+    drawSingleBar(entry.rect, entry.bar.value, "sorted");
+  });
+  active.forEach((entry) => {
+    drawSingleBar(entry.rect, entry.bar.value, getActiveBarStatus(entry.index));
+  });
+}
+
+function drawTransitionBars() {
+  const transition = state.transition;
+  const amount = easeInOutCubic(transition.progress);
+
+  transition.sortedMoves.forEach((move) => {
+    drawSingleBar(interpolateRect(move.fromRect, move.toRect, amount), move.bar.value, "sorted");
+  });
+
+  transition.activeMoves.forEach((move) => {
+    drawSingleBar(interpolateRect(move.fromRect, move.toRect, amount), move.bar.value, "idle");
+  });
+
+  transition.removedMoves.forEach((move) => {
+    const fade = 1 - amount;
+    drawSingleBar(
+      {
+        x: move.fromRect.x + move.driftX * amount,
+        y: move.fromRect.y + move.driftY * amount + amount * 80,
+        width: move.fromRect.width,
+        height: Math.max(18, move.fromRect.height * (1 - amount * 0.45)),
+      },
+      move.bar.value,
+      "target",
+      {
+        alpha: fade,
+        rotation: move.rotation * amount,
+      },
+    );
+  });
+
+  const promotedRect = interpolateRect(transition.promotedMove.fromRect, transition.promotedMove.toRect, amount);
+  promotedRect.y -= Math.sin(Math.PI * amount) * 108;
+  drawSingleBar(promotedRect, transition.promotedMove.bar.value, "promoted");
+}
+
+function drawScannerBeam() {
+  if (state.mode === "celebration" || state.phase === "collapse") {
+    return;
+  }
+
+  let focusPoint = null;
+  let beamWidth = 42;
+
+  if (state.phase === "intro") {
+    const { active } = getNormalSceneBars();
+    if (active.length) {
+      const lastRect = active[active.length - 1].rect;
+      focusPoint = {
+        x: lastRect.x + lastRect.width / 2,
+        y: 180,
+      };
+    }
+  } else if (state.phase === "scan") {
+    const { active } = getNormalSceneBars();
+    const focusIndex = Math.max(0, state.scanIndex);
+    if (active[focusIndex]) {
+      focusPoint = {
+        x: active[focusIndex].rect.x + active[focusIndex].rect.width / 2,
+        y: 180,
+      };
+      beamWidth = active[focusIndex].rect.width * 0.8;
+    }
+  } else if (state.impactPoint) {
+    focusPoint = {
+      x: state.impactPoint.x,
+      y: 180,
+    };
+    beamWidth = 58 + state.blastYield * 16;
+  }
+
+  if (!focusPoint) {
+    return;
+  }
+
+  const beam = ctx.createLinearGradient(0, 170, 0, 720);
+  beam.addColorStop(0, "rgba(255, 255, 255, 0)");
+  beam.addColorStop(0.18, "rgba(255, 235, 170, 0.22)");
+  beam.addColorStop(1, "rgba(255, 235, 170, 0)");
+
+  ctx.save();
+  ctx.globalAlpha = 0.78;
+  ctx.fillStyle = beam;
+  ctx.beginPath();
+  ctx.moveTo(focusPoint.x - beamWidth, 170);
+  ctx.lineTo(focusPoint.x + beamWidth, 170);
+  ctx.lineTo(focusPoint.x + 54, 720);
+  ctx.lineTo(focusPoint.x - 54, 720);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255, 240, 186, 0.95)";
+  ctx.beginPath();
+  ctx.arc(focusPoint.x, focusPoint.y, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawTargetReticle() {
+  if (!state.impactPoint || !["targeting", "missile", "impact"].includes(state.phase)) {
+    return;
+  }
+
+  const radius = 42 + state.blastYield * 18;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 132, 91, 0.85)";
+  ctx.lineWidth = 3;
+  ctx.setLineDash([10, 8]);
+  ctx.beginPath();
+  ctx.arc(state.impactPoint.x, state.impactPoint.y, radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.fillStyle = "rgba(255, 225, 192, 0.95)";
+  ctx.font = "700 20px Trebuchet MS";
+  ctx.textAlign = "center";
+  ctx.fillText(`YIELD ${state.blastYield}`, state.impactPoint.x, state.impactPoint.y - radius - 14);
+  ctx.restore();
+}
+
+function quadraticPoint(start, control, end, amount) {
+  const first = {
+    x: lerp(start.x, control.x, amount),
+    y: lerp(start.y, control.y, amount),
+  };
+  const second = {
+    x: lerp(control.x, end.x, amount),
+    y: lerp(control.y, end.y, amount),
+  };
+  return {
+    x: lerp(first.x, second.x, amount),
+    y: lerp(first.y, second.y, amount),
+  };
+}
+
+function drawMissile() {
+  if (!state.missile) {
+    return;
+  }
+
+  const steps = 28;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 214, 124, 0.52)";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  for (let index = 0; index <= Math.floor(steps * state.missile.progress); index += 1) {
+    const point = quadraticPoint(
+      state.missile.start,
+      state.missile.control,
+      state.missile.target,
+      index / steps,
+    );
+    if (index === 0) {
+      ctx.moveTo(point.x, point.y);
+    } else {
+      ctx.lineTo(point.x, point.y);
+    }
+  }
+  ctx.stroke();
+
+  const point = quadraticPoint(state.missile.start, state.missile.control, state.missile.target, state.missile.progress);
+  ctx.translate(point.x, point.y);
+
+  ctx.fillStyle = "rgba(255, 200, 82, 0.85)";
+  ctx.beginPath();
+  ctx.arc(-16, 0, 12, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#ddd7cf";
+  roundedRect(-10, -8, 36, 16, 6);
+  ctx.fill();
+  ctx.fillStyle = "#d04a2b";
+  ctx.beginPath();
+  ctx.moveTo(26, 0);
+  ctx.lineTo(40, -8);
+  ctx.lineTo(40, 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawImpactEffects() {
+  if (state.impactPoint && state.explosionFlash > 0) {
+    const radius = 58 + state.blastYield * 28;
+    const flash = ctx.createRadialGradient(
+      state.impactPoint.x,
+      state.impactPoint.y,
+      0,
+      state.impactPoint.x,
+      state.impactPoint.y,
+      radius,
+    );
+    flash.addColorStop(0, `rgba(255, 255, 255, ${0.88 * state.explosionFlash})`);
+    flash.addColorStop(0.3, `rgba(255, 210, 108, ${0.72 * state.explosionFlash})`);
+    flash.addColorStop(1, "rgba(255, 80, 50, 0)");
+    ctx.fillStyle = flash;
+    ctx.beginPath();
+    ctx.arc(state.impactPoint.x, state.impactPoint.y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  state.particles.forEach((particle) => {
+    ctx.globalAlpha = Math.max(0, particle.life);
+    ctx.fillStyle = particle.color;
+    ctx.beginPath();
+    ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  state.smoke.forEach((puff) => {
+    ctx.globalAlpha = Math.max(0, Math.min(1, puff.life / 2)) * puff.alpha;
+    ctx.fillStyle = "#4f4f58";
+    ctx.beginPath();
+    ctx.arc(puff.x, puff.y, puff.radius, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawConfetti() {
+  state.confetti.forEach((piece) => {
+    ctx.save();
+    ctx.translate(piece.x, piece.y);
+    ctx.rotate(piece.spin);
+    ctx.fillStyle = piece.color;
+    ctx.fillRect(-piece.size / 2, -piece.size / 2, piece.size, piece.size * 0.55);
+    ctx.restore();
+  });
+}
+
+function drawLabels() {
+  ctx.fillStyle = "#fff0d4";
+  ctx.font = "900 48px Impact";
+  ctx.textAlign = "left";
+  ctx.fillText("North Korea Sort", 64, 96);
+
+  ctx.font = "600 22px Trebuchet MS";
+  ctx.fillStyle = "rgba(255, 239, 208, 0.8)";
+  ctx.fillText("Flying nukes, random blast size, and right-to-left survivor sorting", 66, 130);
+
+  ctx.fillStyle = "rgba(255, 245, 219, 0.92)";
+  ctx.font = "700 24px Trebuchet MS";
+  ctx.fillText("Kill zone", 505, 172);
+
+  const phaseLabel =
+    state.mode === "celebration"
+      ? "Celebration"
+      : state.phase === "intro"
+        ? "Preparing"
+        : state.phase === "scan"
+          ? "Scanning"
+          : state.phase === "targeting"
+            ? "Locking target"
+            : state.phase === "missile"
+              ? "Missile flight"
+              : state.phase === "impact"
+                ? "Detonation"
+                : "Collapse";
+
+  ctx.fillStyle = "rgba(255, 214, 124, 0.94)";
+  ctx.font = "700 28px Trebuchet MS";
+  ctx.textAlign = "right";
+  ctx.fillText(phaseLabel, WIDTH - 70, 104);
+}
+
+function drawRightFrontierMarker() {
+  const totalVisible = state.activeBars.length + state.sortedBars.length + (state.pendingPlacement ? 1 : 0);
+  if (!totalVisible) {
+    return;
+  }
+
+  const layout = createLayout(totalVisible);
+  const frontierX = layout.x + layout.width + 12;
+  ctx.save();
+  ctx.strokeStyle = "rgba(127, 236, 159, 0.5)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(frontierX, 290);
+  ctx.lineTo(frontierX, layout.y + 8);
+  ctx.stroke();
+  ctx.fillStyle = "rgba(171, 255, 195, 0.88)";
+  ctx.font = "700 18px Trebuchet MS";
+  ctx.textAlign = "right";
+  ctx.fillText("Sorted frontier", frontierX - 16, 312);
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, WIDTH, HEIGHT);
+  drawBackground();
+  drawStageFrame();
+  drawScannerBeam();
+  drawTargetReticle();
+  drawRightFrontierMarker();
+
+  if (state.phase === "collapse" && state.transition) {
+    drawTransitionBars();
+  } else {
+    drawNormalBars();
+  }
+
+  drawImpactEffects();
+  drawMissile();
+  drawKim();
+  drawButton();
+  drawLabels();
+
+  if (state.mode === "celebration") {
+    drawConfetti();
+  }
+}
+
+function renderGameToText() {
+  const scene = getNormalSceneBars();
+  const payload = {
+    coordinate_system: "Origin is top-left of a 1400x900 canvas, x grows right and y grows down.",
+    mode: state.mode,
+    phase: state.phase,
+    speed: state.speed,
+    sound_enabled: state.soundEnabled,
+    initial_bar_count: state.initialBarCount,
+    active_count: state.activeBars.length,
+    sorted_count: state.sortedBars.length,
+    destroyed_count: destroyedCount(),
+    scan_index: state.scanIndex,
+    candidate_index: state.candidateIndex,
+    target_indices: [...state.targetIndices],
+    blast_yield: state.blastYield,
+    missile: state.missile
+      ? {
+          progress: Number(state.missile.progress.toFixed(3)),
+          target_x: Math.round(state.missile.target.x),
+          target_y: Math.round(state.missile.target.y),
+        }
+      : null,
+    active_bars: scene.active.map((entry) => ({
+      index: entry.index,
+      value: entry.bar.value,
+      x: Math.round(entry.rect.x),
+      y: Math.round(entry.rect.y),
+      width: Math.round(entry.rect.width),
+      height: Math.round(entry.rect.height),
+      status: getActiveBarStatus(entry.index),
+    })),
+    sorted_bars: scene.sorted.map((entry) => ({
+      order: entry.index,
+      value: entry.bar.value,
+      x: Math.round(entry.rect.x),
+      y: Math.round(entry.rect.y),
+      width: Math.round(entry.rect.width),
+      height: Math.round(entry.rect.height),
+      status: "sorted",
+    })),
+  };
+
+  return JSON.stringify(payload);
+}
+
+function animate(timestamp) {
+  const dt = Math.min(0.05, (timestamp - lastTimestamp) / 1000);
+  lastTimestamp = timestamp;
+  update(dt);
+  render();
+  requestAnimationFrame(animate);
+}
+
+window.render_game_to_text = renderGameToText;
+window.advanceTime = (ms) => {
+  const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+  for (let index = 0; index < steps; index += 1) {
+    update(1 / 60);
+  }
+  lastTimestamp = performance.now();
+  render();
+};
+
+barCountInput.value = String(clamp(Math.round(Number(urlParams.get("bars")) || DEFAULT_BAR_COUNT), MIN_BAR_COUNT, MAX_BAR_COUNT));
+speedInput.value = String(clamp(Number(urlParams.get("speed")) || 1, 0.5, 3));
+state.speed = clamp(Number(speedInput.value), 0.5, 3);
+state.soundEnabled = urlParams.get("sound") !== "0";
+
+speedInput.addEventListener("input", () => {
+  state.speed = clamp(Number(speedInput.value) || 1, 0.5, 3);
+  updateSpeedLabel();
+  refreshDetail();
+});
+
+barCountInput.addEventListener("change", () => {
+  unlockAudio();
+  initializeSimulation();
+});
+
+resetBtn.addEventListener("click", () => {
+  unlockAudio();
+  initializeSimulation();
+});
+
+restartBtn.addEventListener("click", () => {
+  unlockAudio();
+  initializeSimulation();
+});
+
+soundBtn.addEventListener("click", () => {
+  state.soundEnabled = !state.soundEnabled;
+  if (state.soundEnabled) {
+    unlockAudio();
+  } else if (state.audioContext && state.audioContext.state === "running") {
+    state.audioContext.suspend().catch(() => {});
+    updateSoundButton();
+  } else {
+    updateSoundButton();
+  }
+});
+
+document.addEventListener(
+  "pointerdown",
+  () => {
+    unlockAudio();
+  },
+  { passive: true },
+);
+
+updateSpeedLabel();
+updateSoundButton();
+initializeSimulation();
+render();
+requestAnimationFrame(animate);
+
+if (Number.isFinite(requestedAdvance) && requestedAdvance > 0) {
+  window.setTimeout(() => {
+    window.advanceTime(requestedAdvance);
+  }, 0);
+}

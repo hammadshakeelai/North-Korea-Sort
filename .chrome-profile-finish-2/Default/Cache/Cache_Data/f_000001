@@ -1,0 +1,754 @@
+const canvas = document.getElementById("sort-canvas");
+const ctx = canvas.getContext("2d");
+const statusText = document.getElementById("status-text");
+const victoryPanel = document.getElementById("victory-panel");
+const restartBtn = document.getElementById("restart-btn");
+const resetBtn = document.getElementById("reset-btn");
+
+const WIDTH = 1400;
+const HEIGHT = 900;
+const BAR_COUNT = 14;
+const BAR_MIN = 28;
+const BAR_MAX = 100;
+const SCAN_STEP = 0.65;
+const ALERT_STEP = 1.0;
+const BLAST_STEP = 1.1;
+const REBUILD_STEP = 0.85;
+const INTRO_STEP = 0.75;
+
+const state = {
+  mode: "running",
+  phase: "intro",
+  bars: [],
+  scanIndex: 0,
+  failureStart: null,
+  timer: 0,
+  particles: [],
+  smoke: [],
+  confetti: [],
+  blastFlash: 0,
+  lastStatus: "",
+  celebrationPulse: 0,
+};
+
+const urlParams = new URLSearchParams(window.location.search);
+
+function randomInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function makeBars() {
+  const values = [];
+
+  while (values.length < BAR_COUNT) {
+    const next = randomInt(BAR_MIN, BAR_MAX);
+    if (!values.includes(next)) {
+      values.push(next);
+    }
+  }
+
+  for (let i = values.length - 1; i > 0; i -= 1) {
+    const j = randomInt(0, i);
+    [values[i], values[j]] = [values[j], values[i]];
+  }
+
+  if (values.every((value, index, list) => index === 0 || list[index - 1] <= value)) {
+    [values[0], values[values.length - 1]] = [values[values.length - 1], values[0]];
+  }
+
+  return values;
+}
+
+function barLayout() {
+  const x = 510;
+  const y = 735;
+  const width = 760;
+  const gap = 12;
+  const barWidth = (width - gap * (BAR_COUNT - 1)) / BAR_COUNT;
+  const maxHeight = 420;
+  return { x, y, width, gap, barWidth, maxHeight };
+}
+
+function initializeSimulation() {
+  state.mode = "running";
+  state.phase = "intro";
+  state.timer = 0;
+  state.scanIndex = BAR_COUNT - 2;
+  state.failureStart = null;
+  state.bars = makeBars();
+  state.particles = [];
+  state.smoke = [];
+  state.confetti = [];
+  state.blastFlash = 0;
+  state.celebrationPulse = 0;
+  victoryPanel.classList.add("hidden");
+  setStatus("Kim Jong Un lines up the inspectors for another disastrous sort.");
+}
+
+function setStatus(message) {
+  if (message !== state.lastStatus) {
+    state.lastStatus = message;
+    statusText.textContent = message;
+  }
+}
+
+function currentFailureRange() {
+  if (state.failureStart === null) {
+    return null;
+  }
+
+  return { start: state.failureStart, end: state.bars.length - 1 };
+}
+
+function barStatus(index) {
+  if (state.mode === "celebration") {
+    return "sorted";
+  }
+
+  if (state.phase === "alert" || state.phase === "blast" || state.phase === "rebuild") {
+    if (index >= state.failureStart) {
+      return state.phase === "rebuild" ? "repaired" : "doomed";
+    }
+  }
+
+  if (state.phase === "scan" || state.phase === "intro") {
+    if (index > state.scanIndex) {
+      return "sorted";
+    }
+
+    if (index === state.scanIndex) {
+      return "scan";
+    }
+  }
+
+  return "idle";
+}
+
+function spawnBlastParticles() {
+  const range = currentFailureRange();
+
+  if (!range) {
+    return;
+  }
+
+  const layout = barLayout();
+  const startX = layout.x + range.start * (layout.barWidth + layout.gap);
+  const endX = layout.x + (range.end + 1) * layout.barWidth + range.end * layout.gap;
+  const centerX = (startX + endX) * 0.5;
+  const centerY = layout.y - 160;
+
+  for (let i = 0; i < 42; i += 1) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 120 + Math.random() * 260;
+    state.particles.push({
+      x: centerX,
+      y: centerY,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 120,
+      life: 0.55 + Math.random() * 0.6,
+      size: 8 + Math.random() * 22,
+      color: i % 3 === 0 ? "#ffe17f" : i % 3 === 1 ? "#ff715f" : "#ffffff",
+    });
+  }
+
+  for (let i = 0; i < 8; i += 1) {
+    state.smoke.push({
+      x: centerX + randomInt(-80, 80),
+      y: centerY + randomInt(-30, 40),
+      vx: randomInt(-30, 30),
+      vy: -20 - Math.random() * 40,
+      life: 1.4 + Math.random() * 0.9,
+      radius: 32 + Math.random() * 26,
+      alpha: 0.45 + Math.random() * 0.2,
+    });
+  }
+}
+
+function spawnConfetti() {
+  for (let i = 0; i < 5; i += 1) {
+    state.confetti.push({
+      x: randomInt(480, 1280),
+      y: -30 - Math.random() * 120,
+      vx: -40 + Math.random() * 80,
+      vy: 80 + Math.random() * 120,
+      spin: Math.random() * Math.PI,
+      spinVelocity: -5 + Math.random() * 10,
+      life: 2.4 + Math.random() * 1.3,
+      size: 10 + Math.random() * 12,
+      color: ["#42d77c", "#ffe17f", "#ff5d55", "#8de8ff"][i % 4],
+    });
+  }
+}
+
+function repairFailureRange() {
+  const repaired = state.bars.slice(state.failureStart).sort((left, right) => left - right);
+  state.bars.splice(state.failureStart, repaired.length, ...repaired);
+}
+
+function completeSort() {
+  state.mode = "celebration";
+  state.phase = "celebration";
+  state.timer = 0;
+  state.failureStart = null;
+  victoryPanel.classList.remove("hidden");
+  setStatus("The bars are fully sorted. The crowd goes wild.");
+}
+
+function updateAlgorithm(dt) {
+  state.timer += dt;
+
+  if (state.phase === "intro") {
+    setStatus("The checker starts from the right side and prepares to judge the suffix.");
+    if (state.timer >= INTRO_STEP) {
+      state.phase = "scan";
+      state.timer = 0;
+    }
+    return;
+  }
+
+  if (state.phase === "scan") {
+    setStatus("The suffix inspector is moving left and turning compliant bars green.");
+
+    if (state.timer < SCAN_STEP) {
+      return;
+    }
+
+    state.timer = 0;
+
+    if (state.bars[state.scanIndex] <= state.bars[state.scanIndex + 1]) {
+      state.scanIndex -= 1;
+      if (state.scanIndex < 0) {
+        completeSort();
+      }
+      return;
+    }
+
+    state.failureStart = state.scanIndex;
+    state.phase = "alert";
+    setStatus("Disorder detected. The selected bars turn red and the launch button lights up.");
+    return;
+  }
+
+  if (state.phase === "alert") {
+    if (state.timer >= ALERT_STEP) {
+      state.phase = "blast";
+      state.timer = 0;
+      state.blastFlash = 1;
+      spawnBlastParticles();
+      setStatus("Kim Jong Un slams the red button and nukes the rebellious suffix.");
+    }
+    return;
+  }
+
+  if (state.phase === "blast") {
+    state.blastFlash = Math.max(0, 1 - state.timer / BLAST_STEP);
+    if (state.timer >= BLAST_STEP) {
+      repairFailureRange();
+      state.phase = "rebuild";
+      state.timer = 0;
+      setStatus("The smoke clears and the blasted bars come back in sorted order.");
+    }
+    return;
+  }
+
+  if (state.phase === "rebuild" && state.timer >= REBUILD_STEP) {
+    state.failureStart = null;
+    state.scanIndex = state.bars.length - 2;
+    state.phase = "scan";
+    state.timer = 0;
+  }
+}
+
+function updateParticles(collection, dt, gravity = 0) {
+  for (let i = collection.length - 1; i >= 0; i -= 1) {
+    const particle = collection[i];
+    particle.life -= dt;
+
+    if (particle.life <= 0) {
+      collection.splice(i, 1);
+      continue;
+    }
+
+    particle.x += particle.vx * dt;
+    particle.y += particle.vy * dt;
+    particle.vy += gravity * dt;
+  }
+}
+
+function updateSmoke(dt) {
+  for (let i = state.smoke.length - 1; i >= 0; i -= 1) {
+    const puff = state.smoke[i];
+    puff.life -= dt;
+
+    if (puff.life <= 0) {
+      state.smoke.splice(i, 1);
+      continue;
+    }
+
+    puff.x += puff.vx * dt;
+    puff.y += puff.vy * dt;
+    puff.radius += 14 * dt;
+  }
+}
+
+function updateConfetti(dt) {
+  state.celebrationPulse += dt;
+  if (state.celebrationPulse >= 0.14) {
+    state.celebrationPulse = 0;
+    spawnConfetti();
+  }
+
+  for (let i = state.confetti.length - 1; i >= 0; i -= 1) {
+    const piece = state.confetti[i];
+    piece.life -= dt;
+
+    if (piece.life <= 0 || piece.y > HEIGHT + 80) {
+      state.confetti.splice(i, 1);
+      continue;
+    }
+
+    piece.x += piece.vx * dt;
+    piece.y += piece.vy * dt;
+    piece.spin += piece.spinVelocity * dt;
+    piece.vy += 18 * dt;
+  }
+}
+
+function update(dt) {
+  updateParticles(state.particles, dt, 240);
+  updateSmoke(dt);
+
+  if (state.mode === "celebration") {
+    updateConfetti(dt);
+    return;
+  }
+
+  updateAlgorithm(dt);
+}
+
+function roundedRect(x, y, width, height, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, HEIGHT);
+  sky.addColorStop(0, "#5e1211");
+  sky.addColorStop(0.5, "#2c0d0d");
+  sky.addColorStop(1, "#140707");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  const glow = ctx.createRadialGradient(980, 140, 40, 980, 140, 360);
+  glow.addColorStop(0, "rgba(255, 180, 70, 0.42)");
+  glow.addColorStop(1, "rgba(255, 180, 70, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  for (let i = 0; i < 24; i += 1) {
+    const x = 540 + i * 32;
+    const alpha = i % 3 === 0 ? 0.08 : 0.04;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.fillRect(x, 68, 3, 460);
+  }
+
+  ctx.fillStyle = "#20110c";
+  ctx.fillRect(0, 720, WIDTH, 180);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+  ctx.fillRect(0, 700, WIDTH, 20);
+}
+
+function drawStageFrame() {
+  ctx.save();
+  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+  roundedRect(34, 32, WIDTH - 68, HEIGHT - 64, 28);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 196, 104, 0.22)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawKim() {
+  const pressAmount = state.phase === "alert" || state.phase === "blast" ? 1 : 0;
+  const bodyLean = pressAmount ? 12 : 0;
+  const armLean = pressAmount ? 26 : 0;
+
+  ctx.save();
+  ctx.translate(140 + bodyLean, 520);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.beginPath();
+  ctx.ellipse(24, 224, 128, 28, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#101720";
+  roundedRect(-14, 60, 126, 172, 30);
+  ctx.fill();
+
+  ctx.fillStyle = "#f2c49e";
+  ctx.beginPath();
+  ctx.arc(36, 18, 48, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#0b0b0e";
+  ctx.beginPath();
+  ctx.moveTo(-6, 2);
+  ctx.quadraticCurveTo(0, -42, 50, -40);
+  ctx.quadraticCurveTo(94, -36, 86, 10);
+  ctx.quadraticCurveTo(36, 4, -6, 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#44261a";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(60, 20);
+  ctx.lineTo(70, 22);
+  ctx.stroke();
+
+  ctx.strokeStyle = "#23130b";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(44, 34);
+  ctx.lineTo(78, 32);
+  ctx.stroke();
+
+  ctx.fillStyle = "#1d2530";
+  roundedRect(-20, 110, 58, 86, 24);
+  ctx.fill();
+  roundedRect(74, 110, 58, 86, 24);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(84, 100);
+  ctx.rotate((-12 + armLean) * (Math.PI / 180));
+  ctx.fillStyle = "#101720";
+  roundedRect(0, 0, 132, 26, 13);
+  ctx.fill();
+  ctx.fillStyle = "#f2c49e";
+  ctx.beginPath();
+  ctx.ellipse(134, 12, 18, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = "#101720";
+  roundedRect(8, 220, 40, 118, 18);
+  ctx.fill();
+  roundedRect(64, 220, 40, 118, 18);
+  ctx.fill();
+
+  ctx.fillStyle = "#0c1016";
+  roundedRect(-8, 326, 58, 22, 12);
+  ctx.fill();
+  roundedRect(56, 326, 58, 22, 12);
+  ctx.fill();
+
+  ctx.fillStyle = "#fff1dc";
+  ctx.font = "600 24px Trebuchet MS";
+  ctx.fillText("Kim Jong Un", -12, 394);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+  ctx.font = "500 18px Trebuchet MS";
+  ctx.fillText("supreme sorter", -4, 420);
+  ctx.restore();
+}
+
+function drawButton() {
+  const pressed = state.phase === "alert" || state.phase === "blast";
+  const pulse = pressed ? 0.96 : 1 + Math.sin(performance.now() / 300) * 0.02;
+
+  ctx.save();
+  ctx.translate(346, 590);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+  ctx.beginPath();
+  ctx.ellipse(0, 26, 98, 20, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#4d4d52";
+  roundedRect(-82, -6, 160, 54, 20);
+  ctx.fill();
+
+  ctx.scale(pulse, pressed ? 0.92 : 1);
+  const glow = ctx.createRadialGradient(0, 2, 0, 0, 2, 70);
+  glow.addColorStop(0, pressed ? "rgba(255, 245, 150, 0.6)" : "rgba(255, 119, 103, 0.26)");
+  glow.addColorStop(1, "rgba(255, 80, 56, 0)");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 2, 72, 0, Math.PI * 2);
+  ctx.fill();
+
+  const buttonGradient = ctx.createLinearGradient(0, -30, 0, 30);
+  buttonGradient.addColorStop(0, "#ff8c79");
+  buttonGradient.addColorStop(1, "#b1120e");
+  ctx.fillStyle = buttonGradient;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 62, 34, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 62, 34, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "#fff5ea";
+  ctx.font = "800 22px Trebuchet MS";
+  ctx.textAlign = "center";
+  ctx.fillText("NUKE", 0, 8);
+  ctx.restore();
+}
+
+function drawBars() {
+  const layout = barLayout();
+  const scale = layout.maxHeight / BAR_MAX;
+
+  for (let i = 0; i < state.bars.length; i += 1) {
+    const value = state.bars[i];
+    const x = layout.x + i * (layout.barWidth + layout.gap);
+    const height = value * scale;
+    const y = layout.y - height;
+    const status = barStatus(i);
+
+    let fill;
+    if (status === "sorted") {
+      fill = ["#98efb6", "#35c86b"];
+    } else if (status === "scan") {
+      fill = ["#fff9c9", "#ffc445"];
+    } else if (status === "doomed") {
+      fill = ["#ff9d92", "#d31813"];
+    } else if (status === "repaired") {
+      fill = ["#ffd194", "#ff8b2f"];
+    } else {
+      fill = ["#f2e8cd", "#8f7d56"];
+    }
+
+    const gradient = ctx.createLinearGradient(0, y, 0, layout.y);
+    gradient.addColorStop(0, fill[0]);
+    gradient.addColorStop(1, fill[1]);
+
+    ctx.fillStyle = "rgba(0, 0, 0, 0.28)";
+    ctx.fillRect(x + 8, layout.y, layout.barWidth - 2, 10);
+
+    roundedRect(x, y, layout.barWidth, height, 14);
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    if (status === "scan") {
+      ctx.strokeStyle = "rgba(255, 248, 181, 0.8)";
+      ctx.lineWidth = 5;
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = "rgba(32, 12, 6, 0.65)";
+    ctx.font = "700 24px Trebuchet MS";
+    ctx.textAlign = "center";
+    ctx.fillText(String(value), x + layout.barWidth / 2, y + 34);
+  }
+}
+
+function drawCheckerBeam() {
+  if (state.mode === "celebration") {
+    return;
+  }
+
+  const layout = barLayout();
+  const x = layout.x + Math.max(0, state.scanIndex) * (layout.barWidth + layout.gap) + layout.barWidth / 2;
+  const beamWidth = Math.max(30, state.bars.length - Math.max(0, state.scanIndex)) * 6;
+
+  ctx.save();
+  ctx.globalAlpha = 0.78;
+  const beam = ctx.createLinearGradient(0, 170, 0, layout.y);
+  beam.addColorStop(0, "rgba(255, 255, 255, 0)");
+  beam.addColorStop(0.2, "rgba(255, 235, 170, 0.22)");
+  beam.addColorStop(1, "rgba(255, 235, 170, 0)");
+  ctx.fillStyle = beam;
+  ctx.beginPath();
+  ctx.moveTo(x - beamWidth, 170);
+  ctx.lineTo(x + beamWidth, 170);
+  ctx.lineTo(x + 42, layout.y - 10);
+  ctx.lineTo(x - 42, layout.y - 10);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255, 240, 186, 0.95)";
+  ctx.beginPath();
+  ctx.arc(x, 150, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBlast() {
+  const range = currentFailureRange();
+
+  if (!range) {
+    return;
+  }
+
+  const layout = barLayout();
+  const startX = layout.x + range.start * (layout.barWidth + layout.gap);
+  const endX = layout.x + (range.end + 1) * layout.barWidth + range.end * layout.gap;
+  const centerX = (startX + endX) * 0.5;
+  const centerY = layout.y - 180;
+  const progress = state.phase === "blast" ? state.timer / BLAST_STEP : 0;
+  const radius = 60 + progress * 220;
+
+  if (state.phase === "blast") {
+    const flash = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+    flash.addColorStop(0, `rgba(255, 255, 255, ${0.92 * state.blastFlash})`);
+    flash.addColorStop(0.3, `rgba(255, 210, 108, ${0.78 * state.blastFlash})`);
+    flash.addColorStop(1, "rgba(255, 80, 50, 0)");
+    ctx.fillStyle = flash;
+    ctx.beginPath();
+    ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  for (const particle of state.particles) {
+    ctx.globalAlpha = Math.max(0, particle.life);
+    ctx.fillStyle = particle.color;
+    ctx.beginPath();
+    ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  for (const puff of state.smoke) {
+    ctx.globalAlpha = Math.max(0, Math.min(1, puff.life / 2)) * puff.alpha;
+    ctx.fillStyle = "#4f4f58";
+    ctx.beginPath();
+    ctx.arc(puff.x, puff.y, puff.radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawConfetti() {
+  for (const piece of state.confetti) {
+    ctx.save();
+    ctx.translate(piece.x, piece.y);
+    ctx.rotate(piece.spin);
+    ctx.fillStyle = piece.color;
+    ctx.fillRect(-piece.size / 2, -piece.size / 2, piece.size, piece.size * 0.55);
+    ctx.restore();
+  }
+}
+
+function drawLabels() {
+  ctx.fillStyle = "#fff0d4";
+  ctx.font = "900 48px Impact";
+  ctx.textAlign = "left";
+  ctx.fillText("North Korea Sort", 64, 96);
+
+  ctx.font = "600 22px Trebuchet MS";
+  ctx.fillStyle = "rgba(255, 239, 208, 0.8)";
+  ctx.fillText("Right-to-left inspection with catastrophic suffix correction", 66, 130);
+
+  ctx.fillStyle = "rgba(255, 245, 219, 0.92)";
+  ctx.font = "700 24px Trebuchet MS";
+  ctx.fillText("Bars under inspection", 520, 650);
+
+  const phaseText =
+    state.mode === "celebration"
+      ? "Celebration"
+      : state.phase === "intro"
+        ? "Preparing"
+        : state.phase === "scan"
+          ? "Checking suffix"
+          : state.phase === "alert"
+            ? "Target locked"
+            : state.phase === "blast"
+              ? "Nuclear correction"
+              : "Rebuilding";
+
+  ctx.fillStyle = "rgba(255, 214, 124, 0.94)";
+  ctx.font = "700 28px Trebuchet MS";
+  ctx.textAlign = "right";
+  ctx.fillText(phaseText, WIDTH - 70, 104);
+}
+
+function render() {
+  ctx.clearRect(0, 0, WIDTH, HEIGHT);
+  drawBackground();
+  drawStageFrame();
+  drawCheckerBeam();
+  drawBars();
+  drawBlast();
+  drawKim();
+  drawButton();
+  drawLabels();
+
+  if (state.mode === "celebration") {
+    drawConfetti();
+  }
+}
+
+function renderGameToText() {
+  const layout = barLayout();
+  const scale = layout.maxHeight / BAR_MAX;
+  const payload = {
+    coordinate_system: "Origin is top-left of a 1400x900 canvas, x grows right and y grows down.",
+    mode: state.mode,
+    phase: state.phase,
+    scan_index: state.scanIndex,
+    failure_range: currentFailureRange(),
+    status: state.lastStatus,
+    bars: state.bars.map((value, index) => ({
+      index,
+      value,
+      x: Math.round(layout.x + index * (layout.barWidth + layout.gap)),
+      y: Math.round(layout.y - value * scale),
+      width: Math.round(layout.barWidth),
+      height: Math.round(value * scale),
+      status: barStatus(index),
+    })),
+  };
+
+  return JSON.stringify(payload);
+}
+
+let lastTimestamp = performance.now();
+
+function animate(timestamp) {
+  const dt = Math.min(0.05, (timestamp - lastTimestamp) / 1000);
+  lastTimestamp = timestamp;
+  update(dt);
+  render();
+  requestAnimationFrame(animate);
+}
+
+window.render_game_to_text = renderGameToText;
+window.advanceTime = (ms) => {
+  const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+  for (let i = 0; i < steps; i += 1) {
+    update(1 / 60);
+  }
+  lastTimestamp = performance.now();
+  render();
+};
+
+restartBtn.addEventListener("click", initializeSimulation);
+resetBtn.addEventListener("click", initializeSimulation);
+
+initializeSimulation();
+render();
+requestAnimationFrame(animate);
+
+const requestedAdvance = Number(urlParams.get("advance"));
+if (Number.isFinite(requestedAdvance) && requestedAdvance > 0) {
+  window.setTimeout(() => {
+    window.advanceTime(requestedAdvance);
+  }, 0);
+}

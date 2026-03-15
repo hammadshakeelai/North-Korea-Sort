@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>North Korea Sort</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="hero">
+        <p class="eyebrow">A catastrophic sorting demo</p>
+        <h1>North Korea Sort</h1>
+        <p class="subtitle">
+          The green pass now grows from the left, and right-side missiles delete
+          bad bars with zero swaps until the survivors are fully ordered.
+        </p>
+      </header>
+
+      <section class="stage-card">
+        <div class="control-rack">
+          <label class="control-box compact-box">
+            <span class="control-label">Bar count</span>
+            <input
+              id="bar-count-input"
+              class="number-input"
+              type="number"
+              min="6"
+              max="24"
+              step="1"
+              value="14"
+            />
+          </label>
+
+          <label class="control-box knob-box">
+            <span class="control-label">Speed knob</span>
+            <div class="knob-row">
+              <input
+                id="speed-input"
+                class="speed-slider"
+                type="range"
+                min="0.5"
+                max="3"
+                step="0.25"
+                value="1"
+              />
+              <div id="speed-readout" class="knob-readout">1.00x</div>
+            </div>
+          </label>
+
+          <button id="sound-btn" class="ghost-button" type="button">Arm Sound</button>
+          <button id="reset-btn" class="ghost-button" type="button">Deploy New Bars</button>
+        </div>
+
+        <div class="canvas-frame">
+          <canvas
+            id="sort-canvas"
+            width="1400"
+            height="900"
+            aria-label="North Korea Sort animated visualizer"
+          ></canvas>
+
+          <div id="victory-panel" class="overlay hidden" role="dialog" aria-modal="true">
+            <p class="overlay-tag">Zero swaps completed</p>
+            <h2>YEEEAAAH!</h2>
+            <p>The remaining bars are in order, and no swaps were ever used.</p>
+            <button id="restart-btn" type="button">Restart Sequence</button>
+          </div>
+        </div>
+
+        <div class="info-strip">
+          <p id="status-text" class="status-text">Preparing the inspection...</p>
+          <p id="detail-text" class="detail-text">Yield standby.</p>
+        </div>
+      </section>
+
+      <section class="legend">
+        <div class="legend-item">
+          <span class="swatch swatch-neutral"></span>
+          <span>Unchecked bars</span>
+        </div>
+        <div class="legend-item">
+          <span class="swatch swatch-scan"></span>
+          <span>Left-side scan pass</span>
+        </div>
+        <div class="legend-item">
+          <span class="swatch swatch-lock"></span>
+          <span>Locked delete zone</span>
+        </div>
+        <div class="legend-item">
+          <span class="swatch swatch-good"></span>
+          <span>Stable left prefix</span>
+        </div>
+        <div class="legend-item">
+          <span class="swatch swatch-bad"></span>
+          <span>Bars marked for deletion</span>
+        </div>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
