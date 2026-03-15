@@ -4,6 +4,8 @@ A cartoon single-page sorting visualizer where Kim Jong Un watches a left-to-rig
 
 ## Run it
 
+[https://hammadshakeelai.github.io/North-Korea-Sort/](https://hammadshakeelai.github.io/North-Korea-Sort/)
+
 Open [index.html](C:\Users\HP\Documents\GitHub\North Korea Sort\index.html) directly in a browser, or serve the folder with:
 
 ```powershell
