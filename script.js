@@ -585,4 +585,322 @@ function initializeSimulation() {
   refreshDetail();
 }
 
+function updateParticles(collection, dt, gravity = 0) {
+  for (let index = collection.length - 1; index >= 0; index -= 1) {
+    const particle = collection[index];
+    particle.life -= dt;
+
+    if (particle.life <= 0) {
+      collection.splice(index, 1);
+      continue;
+    }
+
+    particle.x += particle.vx * dt;
+    particle.y += particle.vy * dt;
+    particle.vy += gravity * dt;
+  }
+}
+
+function updateSmoke(dt) {
+  for (let index = state.smoke.length - 1; index >= 0; index -= 1) {
+    const puff = state.smoke[index];
+    puff.life -= dt;
+
+    if (puff.life <= 0) {
+      state.smoke.splice(index, 1);
+      continue;
+    }
+
+    puff.x += puff.vx * dt;
+    puff.y += puff.vy * dt;
+    puff.radius += 16 * dt;
+  }
+}
+
+function updateConfetti(dt) {
+  state.celebrationPulse += dt;
+  if (state.celebrationPulse >= 0.12) {
+    state.celebrationPulse = 0;
+    spawnConfettiBurst();
+  }
+
+  for (let index = state.confetti.length - 1; index >= 0; index -= 1) {
+    const piece = state.confetti[index];
+    piece.life -= dt;
+
+    if (piece.life <= 0 || piece.y > HEIGHT + 80) {
+      state.confetti.splice(index, 1);
+      continue;
+    }
+
+    piece.x += piece.vx * dt;
+    piece.y += piece.vy * dt;
+    piece.spin += piece.spinVelocity * dt;
+    piece.vy += 20 * dt;
+  }
+}
+
+function updateAlgorithm(dt) {
+  state.timer += dt;
+  state.explosionFlash = Math.max(0, state.explosionFlash - dt * 2.3);
+
+  if (state.phase === "intro") {
+    setStatus("The left-side inspection is about to begin.");
+    refreshDetail();
+    if (state.timer >= TIMINGS.intro) {
+      startScanPhase();
+    }
+    return;
+  }
+
+  if (state.phase === "scan") {
+    while (state.timer >= TIMINGS.scanStep) {
+      state.timer -= TIMINGS.scanStep;
+      scanOneBar();
+      if (state.phase !== "scan") {
+        break;
+      }
+    }
+    return;
+  }
+
+  if (state.phase === "targeting") {
+    if (state.timer >= TIMINGS.targeting) {
+      launchMissile();
+    }
+    return;
+  }
+
+  if (state.phase === "missile") {
+    if (state.missile) {
+      state.missile.progress = clamp(state.timer / TIMINGS.launch, 0, 1);
+    }
+    if (state.timer >= TIMINGS.launch) {
+      enterImpactPhase();
+    }
+    return;
+  }
+
+  if (state.phase === "impact") {
+    if (state.timer >= TIMINGS.impact) {
+      beginCollapseTransition();
+    }
+    return;
+  }
+
+  if (state.phase === "collapse") {
+    if (state.transition) {
+      state.transition.progress = clamp(state.timer / TIMINGS.collapse, 0, 1);
+    }
+    if (state.timer >= TIMINGS.collapse) {
+      finalizeCollapse();
+    }
+  }
+}
+
+function update(dt) {
+  const scaledDt = dt * state.speed;
+
+  updateParticles(state.particles, scaledDt, 180);
+  updateSmoke(scaledDt);
+
+  if (state.mode === "celebration") {
+    updateConfetti(scaledDt);
+    return;
+  }
+
+  updateAlgorithm(scaledDt);
+}
+
+function roundedRect(x, y, width, height, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+function interpolateRect(fromRect, toRect, amount) {
+  return {
+    x: lerp(fromRect.x, toRect.x, amount),
+    y: lerp(fromRect.y, toRect.y, amount),
+    width: lerp(fromRect.width, toRect.width, amount),
+    height: lerp(fromRect.height, toRect.height, amount),
+  };
+}
+
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, HEIGHT);
+  sky.addColorStop(0, "#5e1211");
+  sky.addColorStop(0.45, "#2c0d0d");
+  sky.addColorStop(1, "#140707");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  const glow = ctx.createRadialGradient(980, 140, 40, 980, 140, 360);
+  glow.addColorStop(0, "rgba(255, 180, 70, 0.42)");
+  glow.addColorStop(1, "rgba(255, 180, 70, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  for (let index = 0; index < 24; index += 1) {
+    const x = 540 + index * 32;
+    const alpha = index % 3 === 0 ? 0.08 : 0.04;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.fillRect(x, 68, 3, 460);
+  }
+
+  ctx.fillStyle = "#20110c";
+  ctx.fillRect(0, 720, WIDTH, 180);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+  ctx.fillRect(0, 700, WIDTH, 20);
+}
+
+function drawStageFrame() {
+  ctx.save();
+  ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+  roundedRect(34, 32, WIDTH - 68, HEIGHT - 64, 28);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 196, 104, 0.22)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawKim() {
+  const pressed = ["targeting", "missile", "impact"].includes(state.phase);
+  const bodyLean = pressed ? 12 : 0;
+  const armLean = pressed ? 26 : 0;
+
+  ctx.save();
+  ctx.translate(140 + bodyLean, 520);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.beginPath();
+  ctx.ellipse(24, 224, 128, 28, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#101720";
+  roundedRect(-14, 60, 126, 172, 30);
+  ctx.fill();
+
+  ctx.fillStyle = "#f2c49e";
+  ctx.beginPath();
+  ctx.arc(36, 18, 48, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#0b0b0e";
+  ctx.beginPath();
+  ctx.moveTo(-6, 2);
+  ctx.quadraticCurveTo(0, -42, 50, -40);
+  ctx.quadraticCurveTo(94, -36, 86, 10);
+  ctx.quadraticCurveTo(36, 4, -6, 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#44261a";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(60, 20);
+  ctx.lineTo(70, 22);
+  ctx.stroke();
+
+  ctx.strokeStyle = "#23130b";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(44, 34);
+  ctx.lineTo(78, 32);
+  ctx.stroke();
+
+  ctx.fillStyle = "#1d2530";
+  roundedRect(-20, 110, 58, 86, 24);
+  ctx.fill();
+  roundedRect(74, 110, 58, 86, 24);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(84, 100);
+  ctx.rotate((-12 + armLean) * (Math.PI / 180));
+  ctx.fillStyle = "#101720";
+  roundedRect(0, 0, 132, 26, 13);
+  ctx.fill();
+  ctx.fillStyle = "#f2c49e";
+  ctx.beginPath();
+  ctx.ellipse(134, 12, 18, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = "#101720";
+  roundedRect(8, 220, 40, 118, 18);
+  ctx.fill();
+  roundedRect(64, 220, 40, 118, 18);
+  ctx.fill();
+
+  ctx.fillStyle = "#0c1016";
+  roundedRect(-8, 326, 58, 22, 12);
+  ctx.fill();
+  roundedRect(56, 326, 58, 22, 12);
+  ctx.fill();
+
+  ctx.fillStyle = "#fff1dc";
+  ctx.font = "600 24px Trebuchet MS";
+  ctx.textAlign = "left";
+  ctx.fillText("Kim Jong Un", -36, 244);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+  ctx.font = "500 18px Trebuchet MS";
+  ctx.fillText("zero-swap sorter", -24, 268);
+  ctx.restore();
+}
+
+function drawButton() {
+  const pressed = ["targeting", "missile", "impact"].includes(state.phase);
+  const pulse = pressed ? 0.95 : 1 + Math.sin(performance.now() / 320) * 0.02;
+
+  ctx.save();
+  ctx.translate(BUTTON_POINT.x, BUTTON_POINT.y);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+  ctx.beginPath();
+  ctx.ellipse(0, 26, 98, 20, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#4d4d52";
+  roundedRect(-82, -6, 160, 54, 20);
+  ctx.fill();
+
+  ctx.scale(pulse, pressed ? 0.9 : 1);
+  const glow = ctx.createRadialGradient(0, 2, 0, 0, 2, 74);
+  glow.addColorStop(0, pressed ? "rgba(255, 245, 150, 0.65)" : "rgba(255, 119, 103, 0.26)");
+  glow.addColorStop(1, "rgba(255, 80, 56, 0)");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 2, 74, 0, Math.PI * 2);
+  ctx.fill();
+
+  const buttonGradient = ctx.createLinearGradient(0, -30, 0, 30);
+  buttonGradient.addColorStop(0, "#ff8c79");
+  buttonGradient.addColorStop(1, "#b1120e");
+  ctx.fillStyle = buttonGradient;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 62, 34, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 62, 34, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "#fff5ea";
+  ctx.font = "800 22px Trebuchet MS";
+  ctx.textAlign = "center";
+  ctx.fillText("NUKE", 0, 8);
+  ctx.restore();
+}
+
 // __APPEND__
